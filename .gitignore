@@ -4,3 +4,6 @@ deps
 *.beam
 *.plt
 erl_crash.dump
+ebin
+log
+*.log
