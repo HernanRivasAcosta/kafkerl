@@ -21,11 +21,26 @@ start_link() ->
 -type restart_strategy() :: {supervisor:strategy(), integer(), integer()}.
 -spec init([]) -> {ok, {restart_strategy(), [supervisor:child_spec()]}}.
 init([]) ->
-  Config = case application:get_env(kafkerl, producer) of
-             undefined  -> lager:error("unable to load producer config"),
-                           [];
-             {ok, List} -> List
-           end,
+  ProducerStart = {kafkerl_producer, start_link, [get_producer_conn_config(),
+                                                  get_producer_options()]},
   {ok, {{one_for_one, 5, 10},
-        [{kafkerl_producer, {kafkerl_producer, start_link, [Config]},
-         permanent, 2000, worker, [kafkerl_producer]}]}}.
+        [{kafkerl_producer, ProducerStart, permanent, 2000, worker,
+          [kafkerl_producer]}]}}.
+
+get_producer_options() ->
+  case application:get_env(kafkerl, producer_options) of
+    undefined ->
+      lager:error("unable to load producer options"),
+      [];
+    {ok, Config} ->
+     Config
+  end.
+
+get_producer_conn_config() ->
+  case application:get_env(kafkerl, producer_conn_config) of
+    undefined ->
+      lager:error("unable to load producer connection config"),
+      [];
+    {ok, ConnConfig} ->
+      ConnConfig
+  end.
