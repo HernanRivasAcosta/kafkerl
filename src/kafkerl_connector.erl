@@ -3,9 +3,11 @@
 
 -behaviour(gen_server).
 
--export([connect/1, connect/2, send/1, send/2]).
+-export([send/1, send/2]).
+-export([add_tcp_listener/1, add_tcp_listener/2]).
+-export([remove_tcp_listener/1, remove_tcp_listener/2]).
 
--export([start_link/0, start_link/1]).
+-export([start_link/1, start_link/2]).
 
 % gen_server callbacks
 -export([init/1, terminate/2, code_change/3,
@@ -17,7 +19,8 @@
                 port     = undefined :: integer() | undefined,
                 socket   = undefined :: any() | undefined,
                 tcp_options     = [] :: [any()],
-                max_retries      = 0 :: integer()}).
+                max_retries      = 0 :: integer(),
+                tcp_listeners   = [] :: [pid()]}).
 
 -type state() :: #state{}.
 
@@ -26,30 +29,20 @@
 %%==============================================================================
 %% API
 %%==============================================================================
--spec start_link() -> {ok, pid()} | ignore | {error, any()}.
-start_link() ->
-  start_link(?MODULE).
+-type start_link_response() :: {ok, pid()} | ignore | {error, any()}.
 
--spec start_link(atom()) -> {ok, pid()} | ignore | {error, any()}.
-start_link(undefined) ->
-  start_link();
-start_link(Name) ->
-  gen_server:start_link({local, Name}, ?MODULE, [], []).
-
--spec connect(kafkerl_conn_config()) -> ok | {error, any()}.
-connect(Config) ->
-  connect(?MODULE, Config).
-
--spec connect(atom(), kafkerl_conn_config()) -> ok | {error, any()}.
-connect(undefined, Config) ->
-  connect(Config);
-connect(Name, Config) ->
-  gen_server:call(Name, {connect, Config}).
+-spec start_link(kafkerl_conn_config()) -> start_link_response().
+start_link(Config) ->
+  start_link(?MODULE, Config).
+-spec start_link(atom(), kafkerl_conn_config()) -> start_link_response().
+start_link(undefined, Config) ->
+  start_link(Config);
+start_link(Name, Config) ->
+  gen_server:start_link({local, Name}, ?MODULE, [Config], []).
 
 -spec send(binary()) -> ok | {error, any()}.
 send(Bin) ->
   send(?MODULE, Bin).
-
 -spec send(atom(), binary()) -> ok | {error, any()};
           (binary(), integer() | infinity) -> ok | {error, any()}.
 send(undefined, Bin) ->
@@ -58,30 +51,48 @@ send(Name, Bin) when is_atom(Name) ->
   send(Name, Bin, infinity);
 send(Bin, Timeout) ->
   send(?MODULE, Bin, Timeout).
-
 -spec send(atom(), binary(), integer() | infinity) -> ok | {error, any()}.
 send(Name, Bin, Timeout) ->
   gen_server:call(Name, {send, Bin}, Timeout).
 
+-spec add_tcp_listener(pid()) -> ok.
+add_tcp_listener(Pid) ->
+  add_tcp_listener(?MODULE, Pid).
+-spec add_tcp_listener(atom(), pid()) -> ok.
+add_tcp_listener(Name, Pid) ->
+  gen_server:call(Name, {add_tcp_listener, Pid}).
+
+-spec remove_tcp_listener(pid()) -> ok.
+remove_tcp_listener(Pid) ->
+  remove_tcp_listener(?MODULE, Pid).
+-spec remove_tcp_listener(atom(), pid()) -> ok.
+remove_tcp_listener(Name, Pid) ->
+  gen_server:call(Name, {remove_tcp_listener, Pid}).
+
 % gen_server callbacks
--type valid_call_message() :: {message, kafkerl_message()} |
-                              {connect, kafkerl_conn_config()} | 
-                              {reconnect, kafkerl_conn_config()}.
+-type valid_call_message() :: {message, binary()} |
+                              {add_tcp_listener, pid()} |
+                              {remove_tcp_listener, pid()}.
 
 -spec handle_call(valid_call_message(), any(), state()) ->
   {reply, ok, state()} |
   {reply, {error, any(), state()}}.
-handle_call({connect, Config}, _From, State) ->
-  case handle_connect(Config, State) of
-    {ok, NewState}     -> {reply, ok, NewState};
-    {errors, Errors}   -> lists:foreach(fun(E) ->
-                                          lager:error("Config error ~p", [E])
-                                        end, Errors),
-                          {reply, {error, invalid_config}, State};
-    Error = {error, _} -> {reply, Error, State}
-  end;
 handle_call({send, Bin}, _From, State) ->
-  {reply, handle_send(Bin, State), State}.
+  {reply, handle_send(Bin, State), State};
+handle_call({add_tcp_listener, Pid}, _From,
+            State = #state{tcp_listeners = Listeners}) ->
+  NewListeners = case lists:member(Pid, Listeners) of
+                   true  -> Listeners;
+                   false -> [Pid | Listeners]
+                 end,
+  {reply, ok, State#state{tcp_listeners = NewListeners}};
+handle_call({remove_tcp_listener, Pid}, _From,
+            State = #state{tcp_listeners = Listeners}) ->
+  NewListeners = case lists:member(Pid, Listeners) of
+                   true  -> Listeners;
+                   false -> [Pid | Listeners]
+                 end,
+  {reply, ok, State#state{tcp_listeners = NewListeners}}.
 
 -spec handle_info(any(), state()) -> {noreply, state()}.
 handle_info({tcp_closed, _Socket}, State = #state{host = Host, port = Port,
@@ -98,8 +109,12 @@ handle_info({tcp_closed, _Socket}, State = #state{host = Host, port = Port,
                     [Host, Port]),
       {stop, {unable_to_reconnect, Reason}, State}
   end;
+handle_info({tcp, _Socket, Bin}, State = #state{tcp_listeners = Listeners}) ->
+  Message = {kafka_message, Bin},
+  lists:foreach(fun(Pid) -> Pid ! Message end, Listeners),
+  {noreply, State};
 handle_info(Msg, State) ->
-  lager:notice("Unexpected info message received: ~p", [Msg]),
+  lager:notice("Unexpected info message received: ~p on ~p", [Msg, State]),
   {noreply, State}.
 
 % Boilerplate
@@ -113,10 +128,7 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%==============================================================================
 %% Handlers
 %%==============================================================================
-init([]) ->
-  {ok, #state{}}.
-
-handle_connect(Config, State) ->
+init([Config]) ->
   Schema = [{host, string, required},
             {port, integer, required},
             {tcp_options, {list, any}, {default, []}},
@@ -125,13 +137,16 @@ handle_connect(Config, State) ->
     {ok, [Host, Port, TCPOpts, MaxRetries]} ->
       case do_connect(Host, Port, TCPOpts) of
         {ok, Socket} ->
-          {ok, State#state{host = Host, port = Port, socket = Socket,
-                           tcp_options = TCPOpts, max_retries = MaxRetries}};
+          {ok, #state{host = Host, port = Port, socket = Socket,
+                      tcp_options = TCPOpts, max_retries = MaxRetries}};
         Error ->
-          Error
+          {stop, {unable_to_connect, Error}}
       end;
-    Errors ->
-      Errors
+    {errors, Errors} ->
+      lists:foreach(fun(E) ->
+                      lager:critical("Connector config error ~p", [E])
+                    end, Errors),
+      {stop, bad_config}
   end.
 
 handle_send(Bin, #state{socket = Socket}) ->
@@ -152,7 +167,7 @@ get_tcp_options(Options) -> % TODO: refactor
 do_connect(Host, Port, TCPOpts) ->
   gen_tcp:connect(Host, Port, get_tcp_options(TCPOpts)).
 
-attempt_reconnection(Host, Port, TCPOpts, Retries) when Retries =< 0 ->
+attempt_reconnection(_Host, _Port, _TCPOpts, Retries) when Retries =< 0 ->
   {error, unable_to_reconnect};
 attempt_reconnection(Host, Port, TCPOpts, Retries) ->
   case do_connect(Host, Port, TCPOpts) of

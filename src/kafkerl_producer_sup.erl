@@ -21,10 +21,13 @@ start_link() ->
 -type restart_strategy() :: {supervisor:strategy(), integer(), integer()}.
 -spec init([]) -> {ok, {restart_strategy(), [supervisor:child_spec()]}}.
 init([]) ->
-  ProducerStart = {kafkerl_producer, start_link, [get_producer_conn_config(),
-                                                  get_producer_options()]},
+  ConnStart = {kafkerl_connector, start_link, [get_connector_name(),
+                                               get_producer_conn_config()]},
+  ProducerStart = {kafkerl_producer, start_link, [get_producer_options()]},
   {ok, {{one_for_one, 5, 10},
-        [{kafkerl_producer, ProducerStart, permanent, 2000, worker,
+        [{kafkerl_connector, ConnStart, permanent, 2000, worker,
+          [kafkerl_connector]},
+         {kafkerl_producer, ProducerStart, permanent, 2000, worker,
           [kafkerl_producer]}]}}.
 
 get_producer_options() ->
@@ -33,7 +36,7 @@ get_producer_options() ->
       lager:error("unable to load producer options"),
       [];
     {ok, Config} ->
-     Config
+      lists:keymerge(1, Config, [{connector, get_connector_name()}])
   end.
 
 get_producer_conn_config() ->
@@ -44,3 +47,6 @@ get_producer_conn_config() ->
     {ok, ConnConfig} ->
       ConnConfig
   end.
+
+get_connector_name() ->
+  kafkerl_producer_connector.

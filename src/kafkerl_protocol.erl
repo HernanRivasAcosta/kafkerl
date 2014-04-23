@@ -1,34 +1,68 @@
 -module(kafkerl_protocol).
 -author('hernanrivasacosta@gmail.com').
 
--export([build_producer_request/4]).
+-export([build_produce_request/4, build_fetch_request/5]).
 
 -include("kafkerl.hrl").
 
 %%==============================================================================
 %% API
 %%==============================================================================
--spec build_producer_request(kafkerl_message(), binary(), integer(),
+% Message building
+-spec build_produce_request(kafkerl_message(), binary(), integer(),
                              kafkerl_compression()) -> iodata().
-build_producer_request(Data, ClientId, CorrelationId, Compression) ->
-  % Build the header (http://goo.gl/7bUeS1)
-  ApiKey = 0,
-  ApiVersion = 0, % Both the key and version should be 0, it's not a placeholder
-  ClientIdSize = byte_size(ClientId),
-  {RequestSize, Request} = build_produce_request(Data, Compression),
-  % 10 is the size of the header
-  MessageSize = ClientIdSize + RequestSize + 10,
-  [<<MessageSize:32/unsigned-integer,
-     ApiKey:16/unsigned-integer,
-     ApiVersion:16/unsigned-integer,
-     CorrelationId:32/unsigned-integer,
-     ClientIdSize:16/unsigned-integer,
-     ClientId/binary>>,
-   Request].
+build_produce_request(Data, ClientId, CorrelationId, Compression) ->
+  {Size, Request} = build_produce_request(Data, Compression),
+  [build_request_header(ClientId, 0, CorrelationId, Size), Request].
+
+-spec build_fetch_request(kafkerl_fetch_request(), binary(), integer(),
+                          integer(), integer()) -> iodata().
+build_fetch_request(Data, ClientId, CorrelationId, MaxWait, MinBytes) ->
+  {Size, Request} = build_fetch_request(Data, MaxWait, MinBytes),
+  [build_request_header(ClientId, 1, CorrelationId, Size), Request].
+
+% Message parsing
+-type fetch_state()      :: {integer(), {integer(), kafkerl_topic()},
+                            {integer(), kafkerl_partition()}, binary()}.
+-type fetched_messages() :: [{kafkerl_topic(),
+                              [{kafkerl_partition(), [binary()]}]}].
+-type fetch_response()   :: {ok, integer(), fetched_messages()} |
+                            {incomplete, integer(), fetched_messages(),
+                             fetch_state()} |
+                            {error, bad_format}.
+
+-spec parse_fetch_response(binary()) -> fetch_response().
+parse_fetch_response(<<CorrelationId:32/unsigned-integer,
+                       FetchResponse/binary>>) ->
+  <<TopicCount:32/unsigned-integer, TopicsBin/binary>> = FetchResponse,
+  case parse_topics(TopicCount, TopicsBin) of
+    {ok, Topics} ->
+      {ok, CorrelationId, Topics};
+    {incomplete, Topics, {LastTopic, LastPartition, Remainder}} ->
+      {incomplete, CorrelationId, Topics, {LastTopic, LastPartition, Remainder}}
+  end.
+
+-spec parse_fetch_response(fetch_state(), binary()) -> fetch_response().
+parse_fetch_response(State, Bin) ->
+  ok.
 
 %%==============================================================================
 %% Utils
 %%==============================================================================
+build_request_header(ClientId, ApiKey, CorrelationId, RequestSize) ->
+  % Build the header (http://goo.gl/5SNNTV)
+  ApiVersion = 0, % Both the key and version should be 0, it's not a placeholder
+  ClientIdSize = byte_size(ClientId),
+  % 10 is the size of the header
+  MessageSize = ClientIdSize + RequestSize + 10,
+  <<MessageSize:32/unsigned-integer,
+     ApiKey:16/unsigned-integer,
+     ApiVersion:16/unsigned-integer,
+     CorrelationId:32/unsigned-integer,
+     ClientIdSize:16/unsigned-integer,
+     ClientId/binary>>.
+
+%% PRODUCE REQUEST
 build_produce_request(SimpleData, Compression) when is_tuple(SimpleData) ->
   build_produce_request([SimpleData], Compression);
 build_produce_request(Data, Compression) ->
@@ -126,3 +160,74 @@ compression_to_int(Other) -> lager:error("invalid compression ~p", [Other]), 0.
 compress(?KAFKERL_COMPRESSION_NONE,   Data) -> Data;
 compress(?KAFKERL_COMPRESSION_GZIP,   Data) -> Data;
 compress(?KAFKERL_COMPRESSION_SNAPPY, Data) -> Data.
+
+%% FETCH REQUEST
+build_fetch_request(SimpleData, MaxWait, MinBytes) when is_tuple(SimpleData) ->
+  build_fetch_request([SimpleData], MaxWait, MinBytes);
+build_fetch_request(Data, MaxWait, MinBytes) ->
+  ReplicaId = -1, % This should always be -1
+  TopicCount = length(Data),
+  {TopicSize, Topics} = build_fetch_topics(Data),
+  % 16 is the size of the header
+  {TopicSize + 16, [<<ReplicaId:32/signed-integer,
+                      MaxWait:32/unsigned-integer,
+                      MinBytes:32/unsigned-integer,
+                      TopicCount:32/unsigned-integer>>,
+                    Topics]}.
+
+build_fetch_topics(Topics) ->
+  build_fetch_topics(Topics, {0, []}).
+
+build_fetch_topics([] = _Topics, {Size, IOList}) ->
+  {Size, lists:reverse(IOList)};
+build_fetch_topics([H | T] = _Topics, {OldSize, IOList}) ->
+  {Size, Topic} = build_fetch_topic(H),
+  build_fetch_topics(T, {OldSize + Size, [Topic | IOList]}).
+
+build_fetch_topic({Topic, Partition}) when is_tuple(Partition) ->
+  build_fetch_topic({Topic, [Partition]});
+build_fetch_topic({Topic, Partitions}) ->
+  TopicSize = byte_size(Topic),
+  PartitionCount = length(Partitions),
+  {Size, BuiltPartitions} = build_fetch_partitions(Partitions),
+  % 6 is the size of the topicSize's 16 bytes + 32 from the partition count
+  {Size + TopicSize + 6, [<<TopicSize:16/unsigned-integer,
+                            Topic/binary,
+                            PartitionCount:32/unsigned-integer>>,
+                          BuiltPartitions]}.
+
+build_fetch_partitions(Partitions) ->
+  build_fetch_partitions(Partitions, {0, []}).
+
+build_fetch_partitions([] = _Partitions, {Size, IOList}) ->
+  {Size, lists:reverse(IOList)};
+build_fetch_partitions([H | T] = _Partitions, {OldSize, IOList}) ->
+  {Size, Partition} = build_fetch_partition(H),
+  build_fetch_partitions(T, {OldSize + Size, [Partition | IOList]}).
+
+build_fetch_partition({Partition, Offset, MaxBytes}) ->
+  {16, <<Partition:32/unsigned-integer,
+         Offset:64/unsigned-integer,
+         MaxBytes:32/unsigned-integer>>}.
+
+% PARSE FETCH RESPONSE
+parse_topics(Count, Bin) ->
+  parse_topics(Count, Bin, []).
+
+parse_topics(0, Bin, Acc) ->
+  lager:info("parsed all topics, remainder is ~p", [Bin]),
+  {ok, lists:reverse(Acc)};
+parse_topics(Count, Bin, Acc) ->
+  case parse_topic(Bin) of
+    {ok, Topic, Remainder} ->
+      parse_topics(Count - 1, Remainder, [Topic | Acc]);
+    {incomplete, {TopicName, LastPartition, Remainder}} ->
+      CurrentTopic = {Count, TopicName},
+      {incomplete, lists:reverse(Acc), {CurrentTopic, LastPartition, Remainder}}
+  end.
+
+parse_topic(<<TopicNameLength:16/unsigned-integer,
+              TopicName:TopicNameLength/binary,
+              PartitionCount:32/unsigned-integer,
+              PartitionBin>>) ->
+  ok.

@@ -5,7 +5,7 @@
 
 -export([send_message/1, send_message/2, send_message/3]).
 
--export([start_link/1, start_link/2, start_link/3]).
+-export([start_link/1, start_link/2]).
 
 % gen_server callbacks
 -export([init/1, terminate/2, code_change/3,
@@ -26,20 +26,13 @@
 -type start_link_response() :: {ok, pid()} | ignore | {error, any()}.
 
 % Starting the server
--spec start_link(kafkerl_conn_config()) -> start_link_response().
-start_link(Config) ->
-  start_link(Config, []).
--spec start_link(atom(), kafkerl_conn_config()) -> start_link_response();
-                (kafkerl_conn_config(), [any()]) -> start_link_response().
-start_link(Name, Config) when is_atom(Name) ->
-  start_link(Name, Config, []);
-start_link(Config, Options) ->
-  start_link(?MODULE, Config, Options).
--spec start_link(atom(), kafkerl_conn_config(), [any()]) ->
-  start_link_response().
-start_link(Name, Config, Options) ->
-  gen_server:start_link({local, Name}, ?MODULE, [Config, Options], []).
-
+-spec start_link(any()) -> start_link_response().
+start_link(Options) ->
+  start_link(?MODULE, Options).
+-spec start_link(atom(), any()) -> start_link_response().
+start_link(Name, Options) when is_atom(Name) ->
+  gen_server:start_link({local, Name}, ?MODULE, [Options], []).
+  
 % Sending messages
 -spec send_message(kafkerl_message()) -> ok.
 send_message(Data) ->
@@ -54,8 +47,21 @@ send_message(Data, Timeout) ->
 send_message(Name, Data, Timeout) ->
   gen_server:call(Name, {send_message, Data}, Timeout).
 
-handle_call({send_message, Bin}, _From, State) ->
-  {reply, handle_send_message(Bin, State), State}.
+% gen_server callbacks
+-type valid_call_message() :: {send_message, kafkerl_message()}.
+
+-spec handle_call(valid_call_message(), any(), state()) ->
+  {reply, ok, state()} |
+  {reply, {error, any(), state()}}.
+handle_call({send_message, Message}, _From,
+            State = #state{correlation_id = CorrelationId}) ->
+  case handle_send_message(Message, State) of
+    ok ->
+      NewState = State#state{correlation_id = CorrelationId + 1},
+      {reply, ok, NewState};
+    Error ->
+      {reply, Error, State}
+  end.
 
 % Boilerplate
 -spec handle_cast(any(), state()) -> {noreply, state()}.
@@ -70,8 +76,8 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%==============================================================================
 %% Handlers
 %%==============================================================================
-init([Config, Options]) ->
-  Schema = [{connector, atom, optional},
+init([Options]) ->
+  Schema = [{connector, atom, required},
             {client_id, binary, required},
             {compression, atom,
              {default, ?KAFKERL_COMPRESSION_NONE},
@@ -79,20 +85,13 @@ init([Config, Options]) ->
             {correlation_id, integer, {default, 0}}],
   case normalizerl:normalize_proplist(Schema, Options) of
     {ok, [ConnectorName, ClientId, Compression, CorrelationId]} ->
-      case kafkerl_connector:start_link(ConnectorName) of
-        {ok, _Pid} ->
-          case kafkerl_connector:connect(ConnectorName, Config) of
-            ok  -> {ok, #state{connector_name = ConnectorName,
-                               client_id = ClientId,
-                               compression  = Compression,
-                               correlation_id = CorrelationId}};
-            Any -> Any
-          end;
-        Other ->
-          Other
-      end;
-    Error ->
-      Error
+      {ok, #state{connector_name = ConnectorName, client_id = ClientId,
+                  compression = Compression, correlation_id = CorrelationId}};
+    {errors, Errors} ->
+      lists:foreach(fun(E) ->
+                      lager:critical("Producer config error ~p", [E])
+                    end, Errors),
+      {stop, bad_config}
   end.
 
 handle_send_message(Data, #state{connector_name = ConnectorName,
@@ -103,6 +102,6 @@ handle_send_message(Data, #state{connector_name = ConnectorName,
                true -> lists:flatten(Data);
                _    -> [Data]
              end,
-  Req = kafkerl_protocol:build_producer_request(FlatData, ClientId,
-                                                CorrelationId, Compression),
+  Req = kafkerl_protocol:build_produce_request(FlatData, ClientId,
+                                               CorrelationId, Compression),
   kafkerl_connector:send(ConnectorName, Req).
