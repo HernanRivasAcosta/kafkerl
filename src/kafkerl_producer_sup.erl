@@ -12,8 +12,6 @@
 %% API
 %%==============================================================================
 -spec start_link([any()]) -> {ok, pid()}.
-start_link([]) ->
-  ok;
 start_link(ProducerConfigs) ->
   supervisor:start_link({local, ?SERVER}, ?MODULE, [ProducerConfigs]).
 
