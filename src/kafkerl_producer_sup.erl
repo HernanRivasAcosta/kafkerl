@@ -3,7 +3,7 @@
 
 -behaviour(supervisor).
 
--export([start_link/0, init/1]).
+-export([start_link/1, init/1]).
 
 
 -define(SERVER, ?MODULE).
@@ -11,42 +11,36 @@
 %%==============================================================================
 %% API
 %%==============================================================================
--spec start_link() -> {ok, pid()}.
-start_link() ->
-    supervisor:start_link({local, ?SERVER}, ?MODULE, []).
+-spec start_link([any()]) -> {ok, pid()}.
+start_link([]) ->
+  ok;
+start_link(ProducerConfigs) ->
+  supervisor:start_link({local, ?SERVER}, ?MODULE, [ProducerConfigs]).
 
 %%==============================================================================
 %% Utils
 %%==============================================================================
 -type restart_strategy() :: {supervisor:strategy(), integer(), integer()}.
 -spec init([]) -> {ok, {restart_strategy(), [supervisor:child_spec()]}}.
-init([]) ->
-  ConnStart = {kafkerl_connector, start_link, [get_connector_name(),
-                                               get_producer_conn_config()]},
-  ProducerStart = {kafkerl_producer, start_link, [get_producer_options()]},
-  {ok, {{one_for_one, 5, 10},
-        [{kafkerl_connector, ConnStart, permanent, 2000, worker,
-          [kafkerl_connector]},
-         {kafkerl_producer, ProducerStart, permanent, 2000, worker,
-          [kafkerl_producer]}]}}.
+init([ProducerConfigs]) ->
+  GetConnector = fun(L) ->
+                   {name, Preffix} = lists:keyfind(name, 1, L),
+                   Name = get_connector_name(Preffix),
+                   {conn_config, Config} = lists:keyfind(conn_config, 1, L),
+                   MFA = {kafkerl_connector, start_link, [Name, Config]},
+                   {Name, MFA, permanent, 2000, worker, [kafkerl_connector]}
+                 end,
+  GetProducer = fun(L) ->
+                  {name, Name} = lists:keyfind(name, 1, L),
+                  {config, Config} = lists:keyfind(config, 1, L),
+                  Config2 = Config ++ [{connector, get_connector_name(Name)}],
+                  MFA = {kafkerl_producer, start_link, [Name, Config2]},
+                  {Name, MFA, permanent, 2000, worker, [kafkerl_producer]}
+                end,
 
-get_producer_options() ->
-  case application:get_env(kafkerl, producer_options) of
-    undefined ->
-      lager:error("unable to load producer options"),
-      [];
-    {ok, Config} ->
-      lists:keymerge(1, Config, [{connector, get_connector_name()}])
-  end.
+  Connectors = lists:map(GetConnector, ProducerConfigs),
+  Producers = lists:map(GetProducer, ProducerConfigs),
+  {ok, {{one_for_one, 5, 10}, Connectors ++ Producers}}.
 
-get_producer_conn_config() ->
-  case application:get_env(kafkerl, producer_conn_config) of
-    undefined ->
-      lager:error("unable to load producer connection config"),
-      [];
-    {ok, ConnConfig} ->
-      ConnConfig
-  end.
-
-get_connector_name() ->
-  kafkerl_producer_connector.
+get_connector_name(ProducerName) ->
+  list_to_atom(atom_to_list(ProducerName) ++ "_connector").
