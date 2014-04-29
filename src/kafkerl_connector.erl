@@ -6,6 +6,8 @@
 -export([send/1, send/2]).
 -export([add_tcp_listener/1, add_tcp_listener/2]).
 -export([remove_tcp_listener/1, remove_tcp_listener/2]).
+% Only for internal use
+-export([reconnect/6]).
 
 -export([start_link/1, start_link/2]).
 
@@ -20,6 +22,8 @@
                 socket   = undefined :: any() | undefined,
                 tcp_options     = [] :: [any()],
                 max_retries      = 0 :: integer(),
+                retry_interval   = 0 :: integer(),
+                reconnecting = false :: boolean(),
                 tcp_listeners   = [] :: [pid()]}).
 
 -type state() :: #state{}.
@@ -94,25 +98,29 @@ handle_call({remove_tcp_listener, Pid}, _From,
                  end,
   {reply, ok, State#state{tcp_listeners = NewListeners}}.
 
--spec handle_info(any(), state()) -> {noreply, state()}.
-handle_info({tcp_closed, _Socket}, State = #state{host = Host, port = Port,
-                                                  tcp_options = TCPOpts,
-                                                  max_retries = MaxRetries}) ->
+-type valid_info_message() :: {tcp_closed, any()} |
+                              {tcp, any(), binary()} |
+                              {socket_updated, any()} |
+                              any().
+
+-spec handle_info(valid_info_message(), state()) -> {noreply, state()}.
+handle_info({tcp_closed, _Socket},
+            State = #state{host = Host, port = Port, tcp_options = TCPOpts,
+                           max_retries = MaxRetries,
+                           retry_interval = RetryInterval}) ->
   lager:warning("lost connection to kafka server at ~s:~p, reconnecting",
                 [Host, Port]),
-  case attempt_reconnection(Host, Port, TCPOpts, MaxRetries) of
-    {ok, Socket} ->
-      lager:info("reconnected to kafka server at ~s:~p", [Host, Port]),
-      {noreply, State#state{socket = Socket}};
-    {error, Reason} -> 
-      lager:warning("reconnection unsuccessful to ~s:~p, terminating",
-                    [Host, Port]),
-      {stop, {unable_to_reconnect, Reason}, State}
-  end;
+  Params = [self(), Host, Port, TCPOpts, MaxRetries, RetryInterval],
+  _Pid = spawn_link(?MODULE, reconnect, Params),
+  {noreply, State#state{socket = undefined, reconnecting = true}};
 handle_info({tcp, _Socket, Bin}, State = #state{tcp_listeners = Listeners}) ->
   Message = {kafka_message, Bin},
   lists:foreach(fun(Pid) -> Pid ! Message end, Listeners),
   {noreply, State};
+handle_info({socket_updated, undefined}, State = #state{socket = undefined}) ->
+  {stop, {error, unable_to_reconnect}, State};
+handle_info({socket_updated, Socket}, State) ->
+  {noreply, State#state{socket = Socket, reconnecting = false}};
 handle_info(Msg, State) ->
   lager:notice("Unexpected info message received: ~p on ~p", [Msg, State]),
   {noreply, State}.
@@ -132,15 +140,19 @@ init([Config]) ->
   Schema = [{host, string, required},
             {port, integer, required},
             {tcp_options, {list, any}, {default, []}},
-            {max_retries, integer, {default, 2}}],
+            {max_retries, integer, {default, -1}},
+            {retry_interval, integer, {default, 1000}}],
   case normalizerl:normalize_proplist(Schema, Config) of
-    {ok, [Host, Port, TCPOpts, MaxRetries]} ->
+    {ok, [Host, Port, TCPOpts, MaxRetries, RetryInterval]} ->
+      State = #state{host = Host, port = Port, tcp_options = TCPOpts,
+                     max_retries = MaxRetries, retry_interval = RetryInterval},
       case do_connect(Host, Port, TCPOpts) of
         {ok, Socket} ->
-          {ok, #state{host = Host, port = Port, socket = Socket,
-                      tcp_options = TCPOpts, max_retries = MaxRetries}};
+          {ok, State#state{socket = Socket}};
         Error ->
-          {stop, {unable_to_connect, Error}}
+          Params = [self(), Host, Port, TCPOpts, -1, RetryInterval],
+          _Pid = spawn_link(?MODULE, reconnect, Params),
+          {ok, State#state{reconnecting = true}}
       end;
     {errors, Errors} ->
       lists:foreach(fun(E) ->
@@ -149,6 +161,10 @@ init([Config]) ->
       {stop, bad_config}
   end.
 
+handle_send(Bin, #state{socket = undefined}) ->
+  % Maybe cache the binary
+  lager:info("ignoring send"),
+  ok;
 handle_send(Bin, #state{socket = Socket}) ->
   case gen_tcp:send(Socket, Bin) of
     {error, Reason} ->
@@ -167,13 +183,17 @@ get_tcp_options(Options) -> % TODO: refactor
 do_connect(Host, Port, TCPOpts) ->
   gen_tcp:connect(Host, Port, get_tcp_options(TCPOpts)).
 
-attempt_reconnection(_Host, _Port, _TCPOpts, Retries) when Retries =< 0 ->
-  {error, unable_to_reconnect};
-attempt_reconnection(Host, Port, TCPOpts, Retries) ->
+reconnect(Pid, _Host, _Port, _TCPOpts, 0, _RetryInterval) ->
+  Pid ! {socket_updated, undefined};
+reconnect(Pid, Host, Port, TCPOpts, Retries, RetryInterval) ->
   case do_connect(Host, Port, TCPOpts) of
     {error, Reason} ->
       lager:warning("unable to connect to kafka server, reason: ~p", [Reason]),
-      attempt_reconnection(Host, Port, TCPOpts, Retries - 1);
-    Ok ->
-      Ok
+      timer:sleep(RetryInterval),
+      NewRetries = Retries - 1,
+      reconnect(Pid, Host, Port, TCPOpts, NewRetries, RetryInterval);
+    {ok, Socket} ->
+      lager:info("reconnected to kafka server at ~s:~p", [Host, Port]),
+      gen_tcp:controlling_process(Socket, Pid),
+      Pid ! {socket_updated, Socket}
   end.
