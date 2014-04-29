@@ -28,4 +28,4 @@ Kafkerl is configured setting what producers and consumers will be available. Cr
                               {retry_interval, 1000}] % the interval between reconnection attempts
                               }]}]}]}
 ```
- * tcp_options are passed to the socket when connecting, the available options are documented [here](http://erlang.org/doc/man/gen_tcp.html#type-connect_option)
+ - **tcp_options** are passed to the socket when connecting, the available options are documented [here](http://erlang.org/doc/man/gen_tcp.html#type-connect_option).
