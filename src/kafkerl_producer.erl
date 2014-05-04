@@ -31,19 +31,19 @@ start_link(Options) ->
   start_link(?MODULE, Options).
 -spec start_link(atom(), any()) -> start_link_response().
 start_link(Name, Options) when is_atom(Name) ->
-  gen_server:start_link({local, Name}, ?MODULE, [Options], []).
+  gen_server:start_link({local, Name}, ?MODULE, {Options}, []).
   
 % Sending messages
 -spec send_message(kafkerl_message()) -> ok.
 send_message(Data) ->
   send_message(?MODULE, Data).
 -spec send_message(atom(), kafkerl_message()) -> ok;
-                  (kafkerl_message(), integer() | infinity) -> ok.
+                  (kafkerl_message(), integer()) -> ok.
 send_message(Name, Data) when is_atom(Name) ->
-  send_message(Name, Data, infinity);
+  send_message(Name, Data, 5000);
 send_message(Data, Timeout) ->
   send_message(?MODULE, Data, Timeout).
--spec send_message(atom(), kafkerl_message(), integer() | infinity) -> ok.
+-spec send_message(atom(), kafkerl_message(), integer()) -> ok.
 send_message(Name, Data, Timeout) ->
   gen_server:call(Name, {send_message, Data}, Timeout).
 
@@ -76,7 +76,14 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%==============================================================================
 %% Handlers
 %%==============================================================================
-init([Options]) ->
+% What is and isn't valid is described on the schema in the init function
+-type valid_producer_option() :: {connector, any()} |
+                                 {client_id, any()} |
+                                 {compression, any()} |
+                                 {correlation_id, any()}.
+
+-spec init({[valid_producer_option()]}) -> {ok, state()} | {stop, any()}.
+init({Options}) ->
   Schema = [{connector, atom, required},
             {client_id, binary, required},
             {compression, atom,
@@ -88,9 +95,9 @@ init([Options]) ->
       {ok, #state{connector_name = ConnectorName, client_id = ClientId,
                   compression = Compression, correlation_id = CorrelationId}};
     {errors, Errors} ->
-      lists:foreach(fun(E) ->
-                      lager:critical("Producer config error ~p", [E])
-                    end, Errors),
+      ok = lists:foreach(fun(E) ->
+                           lager:critical("Producer config error ~p", [E])
+                         end, Errors),
       {stop, bad_config}
   end.
 
