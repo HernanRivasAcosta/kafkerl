@@ -19,12 +19,17 @@
                 correlation_id         = 0 :: integer()}).
 
 -type state() :: #state{}.
+-type start_link_response() :: {ok, pid()} | ignore | {error, any()}.
+-type valid_call_message() :: {send_message, kafkerl_message()}.
+% What is and isn't valid is described on the schema in the init function
+-type valid_producer_option() :: {connector, any()} |
+                                 {client_id, any()} |
+                                 {compression, any()} |
+                                 {correlation_id, any()}.
 
 %%==============================================================================
 %% API
 %%==============================================================================
--type start_link_response() :: {ok, pid()} | ignore | {error, any()}.
-
 % Starting the server
 -spec start_link(any()) -> start_link_response().
 start_link(Options) ->
@@ -48,8 +53,6 @@ send_message(Name, Data, Timeout) ->
   gen_server:call(Name, {send_message, Data}, Timeout).
 
 % gen_server callbacks
--type valid_call_message() :: {send_message, kafkerl_message()}.
-
 -spec handle_call(valid_call_message(), any(), state()) ->
   {reply, ok, state()} |
   {reply, {error, any(), state()}}.
@@ -76,12 +79,6 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%==============================================================================
 %% Handlers
 %%==============================================================================
-% What is and isn't valid is described on the schema in the init function
--type valid_producer_option() :: {connector, any()} |
-                                 {client_id, any()} |
-                                 {compression, any()} |
-                                 {correlation_id, any()}.
-
 -spec init({[valid_producer_option()]}) -> {ok, state()} | {stop, any()}.
 init({Options}) ->
   Schema = [{connector, atom, required},

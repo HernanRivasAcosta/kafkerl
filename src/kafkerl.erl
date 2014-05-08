@@ -8,4 +8,4 @@ start() ->
   application:start(kafkerl).
 
 start(_StartType, _StartArgs) ->
-  kafkerl_producer_sup:start_link().
+  kafkerl_sup:start_link().

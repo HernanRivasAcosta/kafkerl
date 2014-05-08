@@ -27,14 +27,20 @@
                 tcp_listeners   = [] :: [pid()]}).
 
 -type state() :: #state{}.
+-type start_link_response() :: {ok, pid()} | ignore | {error, any()}.
+-type valid_call_message() :: {message, binary()} |
+                              {add_tcp_listener, pid()} |
+                              {remove_tcp_listener, pid()}.            
+-type valid_info_message() :: {tcp_closed, any()} |
+                              {tcp, any(), binary()} |
+                              {socket_updated, any()} |
+                              any().
 
 -define(DEFAULT_TCP_OPTS, lists:sort([binary, {packet, 0}])).
 
 %%==============================================================================
 %% API
 %%==============================================================================
--type start_link_response() :: {ok, pid()} | ignore | {error, any()}.
-
 -spec start_link(kafkerl_conn_config()) -> start_link_response().
 start_link(Config) ->
   start_link(?MODULE, Config).
@@ -74,10 +80,6 @@ remove_tcp_listener(Name, Pid) ->
   gen_server:call(Name, {remove_tcp_listener, Pid}).
 
 % gen_server callbacks
--type valid_call_message() :: {message, binary()} |
-                              {add_tcp_listener, pid()} |
-                              {remove_tcp_listener, pid()}.
-
 -spec handle_call(valid_call_message(), any(), state()) ->
   {reply, ok, state()} |
   {reply, {error, any(), state()}}.
@@ -97,11 +99,6 @@ handle_call({remove_tcp_listener, Pid}, _From,
                    false -> [Pid | Listeners]
                  end,
   {reply, ok, State#state{tcp_listeners = NewListeners}}.
-
--type valid_info_message() :: {tcp_closed, any()} |
-                              {tcp, any(), binary()} |
-                              {socket_updated, any()} |
-                              any().
 
 -spec handle_info(valid_info_message(), state()) -> {noreply, state()}.
 handle_info({tcp_closed, _Socket},
@@ -149,7 +146,7 @@ init([Config]) ->
       case do_connect(Host, Port, TCPOpts) of
         {ok, Socket} ->
           {ok, State#state{socket = Socket}};
-        Error ->
+        _Error ->
           Params = [self(), Host, Port, TCPOpts, -1, RetryInterval],
           _Pid = spawn_link(?MODULE, reconnect, Params),
           {ok, State#state{reconnecting = true}}
@@ -161,7 +158,7 @@ init([Config]) ->
       {stop, bad_config}
   end.
 
-handle_send(Bin, #state{socket = undefined}) ->
+handle_send(_Bin, #state{socket = undefined}) ->
   % Maybe cache the binary
   lager:info("ignoring send"),
   ok;

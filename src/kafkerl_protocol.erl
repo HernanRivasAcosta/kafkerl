@@ -1,9 +1,15 @@
 -module(kafkerl_protocol).
 -author('hernanrivasacosta@gmail.com').
 
--export([build_produce_request/4, build_fetch_request/5]).
+-export([build_produce_request/4, build_fetch_request/5,
+         parse_fetch_response/1, parse_fetch_response/2]).
 
 -include("kafkerl.hrl").
+
+-type fetch_response() :: {ok, integer(), kafkerl_messages()} |
+                          {incomplete, integer(), kafkerl_messages(),
+                           kafkerl_state()} |
+                          {error, bad_format}.
 
 %%==============================================================================
 %% API
@@ -22,32 +28,25 @@ build_fetch_request(Data, ClientId, CorrelationId, MaxWait, MinBytes) ->
   [build_request_header(ClientId, 1, CorrelationId, Size), Request].
 
 % Message parsing
--type fetch_state()      :: {integer(), {integer(), kafkerl_topic()},
-                            {integer(), kafkerl_partition()}, binary()}.
--type fetched_messages() :: [{kafkerl_topic(),
-                              [{kafkerl_partition(), [binary()]}]}].
--type fetch_response()   :: {ok, integer(), fetched_messages()} |
-                            {incomplete, integer(), fetched_messages(),
-                             fetch_state()} |
-                            {error, bad_format}.
-
 -spec parse_fetch_response(binary()) -> fetch_response().
-parse_fetch_response(<<CorrelationId:32/unsigned-integer,
+parse_fetch_response(<<_Size:32/unsigned-integer,
+                       CorrelationId:32/unsigned-integer,
                        FetchResponse/binary>>) ->
   <<TopicCount:32/unsigned-integer, TopicsBin/binary>> = FetchResponse,
   case parse_topics(TopicCount, TopicsBin) of
     {ok, Topics} ->
       {ok, CorrelationId, Topics};
-    {incomplete, Topics, {LastTopic, LastPartition, Remainder}} ->
-      {incomplete, CorrelationId, Topics, {LastTopic, LastPartition, Remainder}}
+    {incomplete, Topics, {Bin, Steps}} ->
+      {incomplete, CorrelationId, Topics, {Bin, CorrelationId, Steps}}
   end.
 
--spec parse_fetch_response(fetch_state(), binary()) -> fetch_response().
-parse_fetch_response(State, Bin) ->
-  ok.
+-spec parse_fetch_response(binary(), kafkerl_state()) -> fetch_response().
+parse_fetch_response(Bin, {Remainder, CorrelationId, Steps}) ->
+  NewBin = <<Remainder/binary, Bin/binary>>,
+  parse_steps(NewBin, CorrelationId, Steps).
 
 %%==============================================================================
-%% Utils
+%% Message Building
 %%==============================================================================
 build_request_header(ClientId, ApiKey, CorrelationId, RequestSize) ->
   % Build the header (http://goo.gl/5SNNTV)
@@ -210,24 +209,167 @@ build_fetch_partition({Partition, Offset, MaxBytes}) ->
          Offset:64/unsigned-integer,
          MaxBytes:32/unsigned-integer>>}.
 
+%%==============================================================================
+%% Message Parsing
+%%==============================================================================
 % PARSE FETCH RESPONSE
 parse_topics(Count, Bin) ->
   parse_topics(Count, Bin, []).
 
 parse_topics(0, Bin, Acc) ->
-  lager:info("parsed all topics, remainder is ~p", [Bin]),
   {ok, lists:reverse(Acc)};
 parse_topics(Count, Bin, Acc) ->
   case parse_topic(Bin) of
     {ok, Topic, Remainder} ->
       parse_topics(Count - 1, Remainder, [Topic | Acc]);
-    {incomplete, {TopicName, LastPartition, Remainder}} ->
-      CurrentTopic = {Count, TopicName},
-      {incomplete, lists:reverse(Acc), {CurrentTopic, LastPartition, Remainder}}
+    {incomplete, Topic, {Remainder, Steps}} ->
+      Step = {topics, Count},
+      {incomplete, lists:reverse(Acc, [Topic]), {Remainder, Steps ++ [Step]}};
+    incomplete ->
+      {incomplete, lists:reverse(Acc), {Bin, [{topics, Count}]}}
   end.
 
 parse_topic(<<TopicNameLength:16/unsigned-integer,
               TopicName:TopicNameLength/binary,
               PartitionCount:32/unsigned-integer,
-              PartitionBin>>) ->
-  ok.
+              PartitionsBin/binary>>) ->
+  case parse_partitions(PartitionCount, PartitionsBin) of
+    {ok, Partitions, Remainder} ->
+      {ok, {TopicName, Partitions}, Remainder};
+    {incomplete, Partitions, {Bin, Steps}} ->
+      Step = {topic, TopicName},
+      {incomplete, {TopicName, Partitions}, {Bin, Steps ++ [Step]}}
+  end;
+parse_topic(_Bin) ->
+  incomplete.
+
+parse_partitions(Count, Bin) ->
+  parse_partitions(Count, Bin, []).
+
+parse_partitions(0, Bin, Acc) ->
+  {ok, lists:reverse(Acc), Bin};
+parse_partitions(Count, Bin, Acc) ->
+  case parse_partition(Bin) of
+    {ok, Partition, Remainder} ->
+      parse_partitions(Count - 1, Remainder, [Partition | Acc]);
+    {incomplete, Partition, {Remainder, Steps}} ->
+      Step = {partitions, Count},
+      NewState = {Remainder, Steps ++ [Step]},
+      {incomplete, lists:reverse(Acc, [Partition]), NewState};
+    incomplete ->
+      Step = {partitions, Count},
+      {incomplete, lists:reverse(Acc), {Bin, [Step]}}
+  end.
+
+parse_partition(<<Partition:32/unsigned-integer,
+                  _ErrorCode:16/signed-integer,
+                  _HighwaterMarkOffset:64/unsigned-integer,
+                  MessageSetSize:32/unsigned-integer,
+                  MessageSetBin/binary>>) ->
+  case parse_message_set(MessageSetSize, MessageSetBin) of
+    {ok, Messages, Remainder} ->
+      {ok, {Partition, Messages}, Remainder};
+    {incomplete, Messages, {Bin, Steps}} ->
+      Step = {partition, Partition},
+      {incomplete, {Partition, Messages}, {Bin, Steps ++ [Step]}}
+  end;
+parse_partition(<<>>) ->
+  incomplete.
+
+parse_message_set(Size, Bin) ->
+  parse_message_set(Size, Bin, []).
+
+parse_message_set(0, Bin, Acc) ->
+  {ok, lists:reverse(Acc), Bin};
+parse_message_set(RemainingSize, Bin, Acc) ->
+  case parse_message(Bin) of
+    {ok, {Message, Size}, Remainder} ->
+      parse_message_set(RemainingSize - Size, Remainder, [Message | Acc]);
+    incomplete ->
+      {incomplete, lists:reverse(Acc), {Bin, [{message_set, RemainingSize}]}}
+  end.
+
+parse_message(<<_Offset:64/unsigned-integer,
+                MessageSize:32/signed-integer,
+                Message:MessageSize/binary,
+                Remainder/binary>>) ->
+  <<_Crc:32/unsigned-integer,
+    _MagicByte:8/unsigned-integer,
+    _Attributes:8/unsigned-integer,
+    % 6 is the size of the magic byte, the attributes and the crc
+    KeyValue/binary>> = Message,
+  KV = case KeyValue of
+         <<KeySize:32/unsigned-integer, Key:KeySize/binary,
+           ValueSize:32/unsigned-integer, Value:ValueSize/binary>> ->
+             {Key, Value};
+         % 4294967295 is -1 and it signifies an empty Key http://goo.gl/Ssl4wq
+         <<4294967295:32/unsigned-integer,
+           ValueSize:32/unsigned-integer, Value:ValueSize/binary>> ->
+             {no_key, Value}
+       end,
+  % 12 is the size of the offset plus the size of the MessageSize int
+  {ok, {KV, MessageSize + 12}, Remainder};
+parse_message(_) ->
+  incomplete.
+
+%%==============================================================================
+%% Utils (aka: don't repeat code)
+%%==============================================================================
+parse_steps(Bin, CorrelationId, Steps) ->
+  parse_steps(Bin, CorrelationId, Steps, void).
+
+parse_steps(<<>>, CorrelationId, [], Data) ->
+  {ok, CorrelationId, Data};
+parse_steps(Bin, CorrelationId, [Step | T], Data) ->
+  case parse_step(Bin, Step, Data) of
+    {ok, NewData} ->
+      {ok, CorrelationId, NewData};
+    {ok, NewData, NewBin} ->
+      parse_steps(NewBin, CorrelationId, T, NewData);
+    {incomplete, NewData, {NewBin, Steps}} ->
+      {incomplete, CorrelationId, NewData, {NewBin, CorrelationId, Steps ++ T}};
+    {incomplete, Steps} ->
+      {incomplete, CorrelationId, Data, {Bin, CorrelationId, Steps ++ T}};
+    {add_steps, NewBin, NewData, Steps} ->
+      parse_steps(NewBin, CorrelationId, Steps ++ T, Data)
+  end.
+
+parse_step(Bin, {topic, void}, Topics) ->
+  case parse_topic(Bin) of
+    {incomplete, Topic, {Remainder, Steps}} ->
+      {add_steps, Remainder, lists:reverse(Topics, [Topic]), Steps};
+    incomplete ->
+      {incomplete, []};
+    {ok, Topic, Remainder} ->
+      {ok, [Topic | Topics], Remainder}
+  end;
+parse_step(Bin, {topic, TopicName},
+           [{Partition, Partitions} | Topics]) when is_integer(Partition) ->
+  {ok, [{TopicName, [{Partition, Partitions}]} | Topics], Bin};
+parse_step(Bin, {topic, TopicName}, Data) ->
+  {add_steps, Bin, Data, [{topic, void}]};
+
+parse_step(Bin, {topics, Count}, void) ->
+  parse_topics(Count, Bin);
+parse_step(Bin, {topics, 1}, Topics) ->
+  {ok, Topics, Bin};
+parse_step(Bin, {topics, Count}, Topics) ->
+  {add_steps, Bin, Topics, [{topic, void}, {topics, Count - 1}]};
+
+parse_step(Bin, {partition, Partition}, Messages) ->
+  {ok, [{Partition, Messages}], Bin};
+
+parse_step(Bin, {partitions, Count}, void) ->
+  parse_partitions(Count, Bin);
+parse_step(Bin, {partitions, 1}, Partitions) ->
+  {ok, Partitions, Bin};
+
+parse_step(Bin, {message_set, RemainingSize}, _) ->
+  case parse_message_set(RemainingSize, Bin) of
+    {incomplete, Messages, State} ->
+      {incomplete, Messages, State};
+    {ok, Messages, <<>>} ->
+      {ok, Messages, <<>>};
+    {ok, Messages, Remainder} ->
+      {ok, Messages, Remainder}
+  end.
