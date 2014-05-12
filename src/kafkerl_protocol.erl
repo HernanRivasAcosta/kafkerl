@@ -216,7 +216,10 @@ build_fetch_partition({Partition, Offset, MaxBytes}) ->
 parse_topics(Count, Bin) ->
   parse_topics(Count, Bin, []).
 
+parse_topics(0, <<>>, Acc) ->
+  {ok, lists:reverse(Acc)};
 parse_topics(0, Bin, Acc) ->
+  lager:warning("finished parsing topics, ignoring bytes: ~p", [Bin]),
   {ok, lists:reverse(Acc)};
 parse_topics(Count, Bin, Acc) ->
   case parse_topic(Bin) of
@@ -331,7 +334,7 @@ parse_steps(Bin, CorrelationId, [Step | T], Data) ->
     {incomplete, Steps} ->
       {incomplete, CorrelationId, Data, {Bin, CorrelationId, Steps ++ T}};
     {add_steps, NewBin, NewData, Steps} ->
-      parse_steps(NewBin, CorrelationId, Steps ++ T, Data)
+      parse_steps(NewBin, CorrelationId, Steps ++ T, NewData)
   end.
 
 parse_step(Bin, {topic, void}, Topics) ->
@@ -346,7 +349,7 @@ parse_step(Bin, {topic, void}, Topics) ->
 parse_step(Bin, {topic, TopicName},
            [{Partition, Partitions} | Topics]) when is_integer(Partition) ->
   {ok, [{TopicName, [{Partition, Partitions}]} | Topics], Bin};
-parse_step(Bin, {topic, TopicName}, Data) ->
+parse_step(Bin, {topic, _TopicName}, Data) ->
   {add_steps, Bin, Data, [{topic, void}]};
 
 parse_step(Bin, {topics, Count}, void) ->

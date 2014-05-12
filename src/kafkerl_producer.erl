@@ -4,12 +4,17 @@
 -behaviour(gen_server).
 
 -export([send_message/1, send_message/2, send_message/3]).
+-export([send_message_validated/1, send_message_validated/2,
+         send_message_validated/3]).
 
 -export([start_link/1, start_link/2]).
 
 % gen_server callbacks
 -export([init/1, terminate/2, code_change/3,
          handle_call/3, handle_cast/2, handle_info/2]).
+
+% Exported for testing only
+-export([valid_topics/1]).
 
 -include("kafkerl.hrl").
 
@@ -26,6 +31,7 @@
                                  {client_id, any()} |
                                  {compression, any()} |
                                  {correlation_id, any()}.
+-type error() :: {error, any()}.
 
 %%==============================================================================
 %% API
@@ -51,6 +57,33 @@ send_message(Data, Timeout) ->
 -spec send_message(atom(), kafkerl_message(), integer()) -> ok.
 send_message(Name, Data, Timeout) ->
   gen_server:call(Name, {send_message, Data}, Timeout).
+
+% Sending messages with input validation
+-spec send_message_validated(kafkerl_message()) -> ok | error().
+send_message_validated(Data) ->
+  case valid_topics(Data) of
+    true  -> send_message(Data);
+    false -> validation_error()
+  end.
+-spec send_message_validated(atom(), kafkerl_message()) -> ok | error();
+                            (kafkerl_message(), integer()) -> ok | error().
+send_message_validated(Name, Data) when is_atom(Name) ->
+  case valid_topics(Data) of
+    true  -> send_message(Name, Data);
+    false -> validation_error()
+  end;
+send_message_validated(Data, Timeout) ->
+  case valid_topics(Data) of
+    true  -> send_message(Data, Timeout);
+    false -> validation_error()
+  end.
+-spec send_message_validated(atom(), kafkerl_message(), integer()) ->
+  ok | error().
+send_message_validated(Name, Data, Timeout) ->
+  case valid_topics(Data) of
+    true  -> send_message(Name, Data, Timeout);
+    false -> validation_error()
+  end.
 
 % gen_server callbacks
 -spec handle_call(valid_call_message(), any(), state()) ->
@@ -109,3 +142,45 @@ handle_send_message(Data, #state{connector_name = ConnectorName,
   Req = kafkerl_protocol:build_produce_request(FlatData, ClientId,
                                                CorrelationId, Compression),
   kafkerl_connector:send(ConnectorName, Req).
+
+%%==============================================================================
+%% Message validation
+%%==============================================================================
+valid_topics([]) ->
+  false;
+valid_topics(Topics) when is_list(Topics) ->
+  lists:all(fun valid_topic/1, Topics);
+valid_topics(Topic) ->
+  valid_topic(Topic).
+
+valid_topic({Bin, Partitions}) when is_binary(Bin) ->
+  valid_partitions(Partitions);
+valid_topic({Bin, Partition, Message}) when is_binary(Bin) ->
+  is_integer(Partition) andalso valid_messages(Message);
+valid_topic(_Other) ->
+  false.
+
+valid_partitions([]) ->
+  false;
+valid_partitions(Partitions) when is_list(Partitions) ->
+  lists:all(fun valid_partition/1, Partitions);
+valid_partitions(Partition) ->
+  valid_partition(Partition).
+
+valid_partition({Int, Message}) when is_integer(Int) ->
+  valid_messages(Message);
+valid_partition(_Other) ->
+  false.
+
+valid_messages([]) ->
+  false;
+valid_messages(Messages) when is_list(Messages) ->
+  lists:all(fun valid_message/1, Messages);
+valid_messages(Message) ->
+  valid_message(Message).
+
+valid_message(Bin) ->
+  is_binary(Bin).
+
+validation_error() ->
+  {error, malformed}.

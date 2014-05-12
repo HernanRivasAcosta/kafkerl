@@ -1,5 +1,5 @@
 -module(kafkerl_sup).
--author('hernan@inakanetworks.net').
+-author('hernanrivasacosta@gmail.com').
 
 -behaviour(supervisor).
 

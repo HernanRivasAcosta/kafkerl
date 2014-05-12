@@ -1,4 +1,5 @@
 -module(kafkerl_error).
+-author('hernanrivasacosta@gmail.com').
 
 -export([get_error_name/1, get_error_description/1, get_error_tuple/1]).
 
