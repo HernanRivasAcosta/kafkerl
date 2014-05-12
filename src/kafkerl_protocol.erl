@@ -330,11 +330,13 @@ parse_steps(Bin, CorrelationId, [Step | T], Data) ->
     {ok, NewData, NewBin} ->
       parse_steps(NewBin, CorrelationId, T, NewData);
     {incomplete, NewData, {NewBin, Steps}} ->
-      {incomplete, CorrelationId, NewData, {NewBin, CorrelationId, Steps ++ T}};
+      NewState = {NewBin, CorrelationId, Steps ++ T},
+      {incomplete, CorrelationId, add_context_to_data(NewData, T), NewState};
     {incomplete, Steps} ->
-      {incomplete, CorrelationId, Data, {Bin, CorrelationId, Steps ++ T}};
+      NewState = {Bin, CorrelationId, Steps ++ T},
+      {incomplete, CorrelationId, add_context_to_data(Data, T), NewState};
     {add_steps, NewBin, NewData, Steps} ->
-      parse_steps(NewBin, CorrelationId, Steps ++ T, NewData)
+      parse_steps(NewBin, CorrelationId, Steps ++ T, Data)
   end.
 
 parse_step(Bin, {topic, void}, Topics) ->
@@ -349,7 +351,7 @@ parse_step(Bin, {topic, void}, Topics) ->
 parse_step(Bin, {topic, TopicName},
            [{Partition, Partitions} | Topics]) when is_integer(Partition) ->
   {ok, [{TopicName, [{Partition, Partitions}]} | Topics], Bin};
-parse_step(Bin, {topic, _TopicName}, Data) ->
+parse_step(Bin, {topic, TopicName}, Data) ->
   {add_steps, Bin, Data, [{topic, void}]};
 
 parse_step(Bin, {topics, Count}, void) ->
@@ -376,3 +378,12 @@ parse_step(Bin, {message_set, RemainingSize}, _) ->
     {ok, Messages, Remainder} ->
       {ok, Messages, Remainder}
   end.
+
+add_context_to_data(Data, []) ->
+  Data;
+add_context_to_data(Data, [{partition, Partition} | T]) ->
+  add_context_to_data([{Partition, Data}], T);
+add_context_to_data(Data, [{topic, Topic} | T]) ->
+  add_context_to_data([{Topic, Data}], T);
+add_context_to_data(Data, [_H | T]) ->
+  add_context_to_data(Data, T).
