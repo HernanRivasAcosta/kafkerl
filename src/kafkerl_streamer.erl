@@ -89,9 +89,7 @@ handle_cast({stream_received, {Status, OffsetData, _CorrelationId}, Data},
             end,
   Offset = case OffsetData of
              [{_, [NewOffset]}] -> NewOffset;
-             [{_, []}]          -> OldOffset;
-             []                 -> OldOffset;
-             Any                -> lager:error("unexpected offset format ~p", [Any]), OldOffset
+             _                  -> OldOffset
            end,
   {noreply, State#state{offset = Offset, timer_ref = NewTRef}};
 handle_cast(on_timeout, State = #state{request = Request}) ->
@@ -142,5 +140,5 @@ handle_start_timer(incomplete, _State) ->
 %%==============================================================================
 format_data([]) ->
   [];
-format_data([{_, Data}]) ->
+format_data([{_, [{_, Data}]}]) ->
   Data.
