@@ -9,7 +9,7 @@
 -type fetch_response() :: {ok, integer(), kafkerl_messages()} |
                           {incomplete, integer(), kafkerl_messages(),
                            kafkerl_state()} |
-                          {error, bad_format}.
+                          {error, atom() | {atom(), any()}}.
 
 %%==============================================================================
 %% API
@@ -37,7 +37,9 @@ parse_fetch_response(<<_Size:32/unsigned-integer,
     {ok, Topics} ->
       {ok, CorrelationId, Topics};
     {incomplete, Topics, {Bin, Steps}} ->
-      {incomplete, CorrelationId, Topics, {Bin, CorrelationId, Steps}}
+      {incomplete, CorrelationId, Topics, {Bin, CorrelationId, Steps}};
+    Error ->
+      Error
   end.
 
 -spec parse_fetch_response(binary(), kafkerl_state()) -> fetch_response().
@@ -229,7 +231,9 @@ parse_topics(Count, Bin, Acc) ->
       Step = {topics, Count},
       {incomplete, lists:reverse(Acc, [Topic]), {Remainder, Steps ++ [Step]}};
     incomplete ->
-      {incomplete, lists:reverse(Acc), {Bin, [{topics, Count}]}}
+      {incomplete, lists:reverse(Acc), {Bin, [{topics, Count}]}};
+    Error ->
+      Error
   end.
 
 parse_topic(<<TopicNameLength:16/unsigned-integer,
@@ -241,7 +245,9 @@ parse_topic(<<TopicNameLength:16/unsigned-integer,
       {ok, {TopicName, Partitions}, Remainder};
     {incomplete, Partitions, {Bin, Steps}} ->
       Step = {topic, TopicName},
-      {incomplete, {TopicName, Partitions}, {Bin, Steps ++ [Step]}}
+      {incomplete, {TopicName, Partitions}, {Bin, Steps ++ [Step]}};
+    Error ->
+      Error
   end;
 parse_topic(_Bin) ->
   incomplete.
@@ -261,14 +267,17 @@ parse_partitions(Count, Bin, Acc) ->
       {incomplete, lists:reverse(Acc, [Partition]), NewState};
     incomplete ->
       Step = {partitions, Count},
-      {incomplete, lists:reverse(Acc), {Bin, [Step]}}
+      {incomplete, lists:reverse(Acc), {Bin, [Step]}};
+    Error ->
+      Error
   end.
 
-parse_partition(<<Partition:32/unsigned-integer,
-                  _ErrorCode:16/signed-integer,
-                  _HighwaterMarkOffset:64/unsigned-integer,
+parse_partition(<<PartitionId:32/unsigned-integer,
+                  0:16/signed-integer, % 0 = No error
+                  HighwaterMarkOffset:64/unsigned-integer,
                   MessageSetSize:32/unsigned-integer,
                   MessageSetBin/binary>>) ->
+  Partition = {PartitionId, HighwaterMarkOffset},
   case parse_message_set(MessageSetSize, MessageSetBin) of
     {ok, Messages, Remainder} ->
       {ok, {Partition, Messages}, Remainder};
@@ -276,6 +285,10 @@ parse_partition(<<Partition:32/unsigned-integer,
       Step = {partition, Partition},
       {incomplete, {Partition, Messages}, {Bin, Steps ++ [Step]}}
   end;
+parse_partition(<<Partition:32/unsigned-integer,
+                  ErrorCode:16/signed-integer,
+                  _/binary>>) ->
+  kafkerl_error:get_error_tuple(ErrorCode);
 parse_partition(<<>>) ->
   incomplete.
 
@@ -331,12 +344,14 @@ parse_steps(Bin, CorrelationId, [Step | T], Data) ->
       parse_steps(NewBin, CorrelationId, T, NewData);
     {incomplete, NewData, {NewBin, Steps}} ->
       NewState = {NewBin, CorrelationId, Steps ++ T},
-      {incomplete, CorrelationId, add_context_to_data(NewData, T), NewState};
+      {incomplete, CorrelationId, add_context_to_data(NewData, Steps ++ T), NewState};
     {incomplete, Steps} ->
       NewState = {Bin, CorrelationId, Steps ++ T},
-      {incomplete, CorrelationId, add_context_to_data(Data, T), NewState};
+      {incomplete, CorrelationId, add_context_to_data(Data, Steps ++ T), NewState};
     {add_steps, NewBin, NewData, Steps} ->
-      parse_steps(NewBin, CorrelationId, Steps ++ T, Data)
+      parse_steps(NewBin, CorrelationId, Steps ++ T, Data);
+    Error = {error, _Reason} ->
+      Error
   end.
 
 parse_step(Bin, {topic, void}, Topics) ->
@@ -351,8 +366,10 @@ parse_step(Bin, {topic, void}, Topics) ->
 parse_step(Bin, {topic, TopicName},
            [{Partition, Partitions} | Topics]) when is_integer(Partition) ->
   {ok, [{TopicName, [{Partition, Partitions}]} | Topics], Bin};
-parse_step(Bin, {topic, TopicName}, Data) ->
-  {add_steps, Bin, Data, [{topic, void}]};
+parse_step(<<>>, {topic, TopicName}, Data) ->
+  {ok, [{TopicName, Data}]};
+parse_step(_Bin, {topic, TopicName}, _Data) ->
+  {incomplete, [{topic, TopicName}]};
 
 parse_step(Bin, {topics, Count}, void) ->
   parse_topics(Count, Bin);

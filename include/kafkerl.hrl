@@ -36,5 +36,6 @@
                                     {compression, kafkerl_compression()}}].
 
 -type kafkerl_messages()        :: [{kafkerl_topic(),
-                                     [{kafkerl_partition(), [binary()]}]}].
+                                     [{{kafkerl_partition(), integer()},
+                                       [binary()]}]}].
 -type kafkerl_state()           :: {binary(), integer(), [any()]}.

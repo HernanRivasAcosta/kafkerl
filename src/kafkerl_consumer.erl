@@ -12,9 +12,9 @@
          handle_call/3, handle_cast/2, handle_info/2]).
 
 -include("kafkerl.hrl").
+-include("kafkerl_consumers.hrl").
 
--type callback()        :: {atom(), atom()} | {atom(), atom(), [any()]} | pid().
--type pending_request() :: {kafkerl_fetch_request(), callback()}.
+-type pending_request() :: {kafkerl_fetch_request(), kafkerl_callback()}.
 
 -record(state, {connector_name = undefined :: atom() | undefined,
                 client_id      = undefined :: binary(),
@@ -23,12 +23,12 @@
                 correlation_id         = 0 :: integer(),
                 parsing_state       = void :: kafkerl_state() | void | pending,
                 pending_requests      = [] :: [pending_request()],
-                callback       = undefined :: callback()}).
+                callback       = undefined :: kafkerl_callback()}).
 
 -type state() :: #state{}.
 -type start_link_response() :: {ok, pid()} | ignore | {error, any()}.
--type valid_cast_message() :: {request_topics, kafkerl_fetch_request(),
-                               callback()}.
+-type valid_cast_message()  :: {request_topics, kafkerl_fetch_request(),
+                                kafkerl_callback()}.
 
 %%==============================================================================
 %% API
@@ -42,17 +42,17 @@ start_link(Name, Options) when is_atom(Name) ->
   gen_server:start_link({local, Name}, ?MODULE, [Options], []).
 
 % Requesting topics
--spec request_topics(kafkerl_fetch_request(), callback()) -> ok.
+-spec request_topics(kafkerl_fetch_request(), kafkerl_callback()) -> ok.
 request_topics(Topics, Callback) ->
   request_topics(?MODULE, Topics, Callback).
--spec request_topics(atom(), kafkerl_fetch_request(), callback()) -> ok.
+-spec request_topics(atom(), kafkerl_fetch_request(), kafkerl_callback()) -> ok.
 request_topics(Name, Topics, Callback) ->
   gen_server:cast(Name, {request_topics, Topics, Callback}).
 
 % gen_server callbacks
 -spec handle_cast(valid_cast_message(), state()) -> {noreply, state()}.
 handle_cast({request_topics, Topic, Callback}, State) when is_tuple(Topic) ->
-  handle_cast({request_topics, [Topic], Callback}, State);  
+  handle_cast({request_topics, [Topic], Callback}, State);
 handle_cast({request_topics, Topics, Callback},
             State = #state{correlation_id = CorrelationId,
                            parsing_state  = void}) ->
@@ -131,15 +131,20 @@ handle_request_topics(Topics, #state{connector_name = ConnectorName,
                                              MaxWait, MinBytes),
   kafkerl_connector:send(ConnectorName, Req).
 
-on_binary_received(Bin, Callback) ->
-  case parse_fetch_response(Bin) of
-    {ok, CorrelationId, Data} ->
-      callback(Callback, CorrelationId, get_data_to_send(Data));
-    {incomplete, CorrelationId, Data, State} ->
-      callback(Callback, CorrelationId, get_data_to_send(Data)),
+on_binary_received(Response, Callback) ->
+  case parse_fetch_response(Response) of
+    {ok, CorrelationId, DataWithOffset} ->
+      {Offset, Data} = separate_offset_and_data(DataWithOffset),
+      Metadata = {done, Offset, CorrelationId},
+      kafkerl_utils:callback(Callback, Metadata, get_data_to_send(Data));
+    {incomplete, CorrelationId, DataWithOffset, State} ->
+      {Offset, Data} = separate_offset_and_data(DataWithOffset),
+      Metadata = {incomplete, Offset, CorrelationId},
+      kafkerl_utils:callback(Callback, Metadata, get_data_to_send(Data)),
       {incomplete, State};
     {error, Reason} ->
-      lager:error("unable to read kafka message, reason: ~p", [Reason])
+      lager:error("unable to read kafka message, reason: ~p", [Reason]),
+      kafkerl_utils:error(Callback, Reason)
   end.
 
 parse_fetch_response({Binary, ParsingState}) when is_atom(ParsingState) ->
@@ -156,18 +161,6 @@ handle_pending_requests(_PendingRequests = [{Req, Callback} | Reqs]) ->
 %%==============================================================================
 %% Utils
 %%==============================================================================
-callback(_Callback, _CorrelationId, _Data = []) ->
-  ok;
-callback({M, F}, CorrelationId, Data) ->
-  spawn(fun() -> M:F(CorrelationId, Data) end),
-  ok;
-callback({M, F, A}, CorrelationId, Data) ->
-  spawn(fun() -> apply(M, F, A ++ [CorrelationId, Data]) end),
-  ok;
-callback(Pid, CorrelationId, Data) ->
-  Pid ! {kafka_message, CorrelationId, Data},
-  ok.
-
 get_data_to_send(RawData) ->
   lists:filtermap(fun nonempty_topic/1, RawData).
 
@@ -181,3 +174,8 @@ nonempty_partition({_Partition, _Messages = []}) ->
   false;
 nonempty_partition(Partition) ->
   {true, Partition}.
+
+separate_offset_and_data(DataWithOffset) ->
+  Offsets = [{T, [O || {{_, O}, _} <- Ps]} || {T, Ps} <- DataWithOffset],
+  Data = [{T, [{P, L} || {{P, _}, L} <- Ps]} || {T, Ps} <- DataWithOffset],
+  {Offsets, Data}.
