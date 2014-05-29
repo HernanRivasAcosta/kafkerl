@@ -85,7 +85,8 @@ build_produce_request({Topic, Partition, Messages}, Compression) ->
       Size:32/unsigned-integer>>,
     MessageSet]};
 build_produce_request(Data, Compression) ->
-  % Build the body of the request (Docs at: http://goo.gl/J3C50c)
+  % Build the body of the request with multiple topics/partitions
+  % (Docs at: http://goo.gl/J3C50c)
   RequiredAcks = 0,
   Timeout = -1,
   TopicCount = length(Data),
@@ -183,8 +184,23 @@ compress(?KAFKERL_COMPRESSION_GZIP,   Data) -> Data;
 compress(?KAFKERL_COMPRESSION_SNAPPY, Data) -> Data.
 
 %% FETCH REQUEST
-build_fetch_request(SimpleData, MaxWait, MinBytes) when is_tuple(SimpleData) ->
-  build_fetch_request([SimpleData], MaxWait, MinBytes);
+build_fetch_request([{Topic, {Partition, Offset, MaxBytes}}], MaxWait, MinBytes) ->
+  build_fetch_request({Topic, {Partition, Offset, MaxBytes}}, MaxWait, MinBytes);
+build_fetch_request([{Topic, [{Partition, Offset, MaxBytes}]}], MaxWait, MinBytes) ->
+  build_fetch_request({Topic, {Partition, Offset, MaxBytes}}, MaxWait, MinBytes);
+build_fetch_request({Topic, {Partition, Offset, MaxBytes}}, MaxWait, MinBytes) ->
+  TopicSize = byte_size(Topic),
+  {TopicSize + 38,
+   [<<-1:32/signed-integer,  % ReplicaId
+      MaxWait:32/unsigned-integer,
+      MinBytes:32/unsigned-integer,
+      1:32/unsigned-integer, % TopicCount
+      TopicSize:16/unsigned-integer>>,
+    Topic,
+    <<1:32/unsigned-integer, % PartitionCount
+      Partition:32/unsigned-integer,
+      Offset:64/unsigned-integer,
+      MaxBytes:32/unsigned-integer>>]};
 build_fetch_request(Data, MaxWait, MinBytes) ->
   ReplicaId = -1, % This should always be -1
   TopicCount = length(Data),
