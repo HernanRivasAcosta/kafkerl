@@ -64,8 +64,26 @@ build_request_header(ClientId, ApiKey, CorrelationId, RequestSize) ->
      ClientId/binary>>.
 
 %% PRODUCE REQUEST
-build_produce_request(SimpleData, Compression) when is_tuple(SimpleData) ->
-  build_produce_request([SimpleData], Compression);
+build_produce_request([{Topic, Partition, Messages}], Compression) ->
+  build_produce_request({Topic, Partition, Messages}, Compression);
+build_produce_request([{Topic, [{Partition, Messages}]}], Compression) ->
+  build_produce_request({Topic, Partition, Messages}, Compression);
+build_produce_request({Topic, [{Partition, Messages}]}, Compression) ->
+  build_produce_request({Topic, Partition, Messages}, Compression);
+build_produce_request({Topic, Partition, Messages}, Compression) ->
+  % This is a fast version used when producing for a single topic and partition
+  TopicSize = byte_size(Topic),
+  {Size, MessageSet} = build_message_set(Messages, Compression),
+  {Size + TopicSize + 24,
+   [<<0:16/unsigned-integer,  % RequiredAcks
+      -1:32/unsigned-integer, % Timeout
+      1:32/unsigned-integer,  % TopicCount
+      TopicSize:16/unsigned-integer>>,
+    Topic,
+    <<1:32/unsigned-integer,  % PartitionCount
+      Partition:32/unsigned-integer,
+      Size:32/unsigned-integer>>,
+    MessageSet]};
 build_produce_request(Data, Compression) ->
   % Build the body of the request (Docs at: http://goo.gl/J3C50c)
   RequiredAcks = 0,
@@ -117,6 +135,8 @@ build_partition({Partition, Messages}, Compression) ->
               MessageSet]}.
 
 % Docs at http://goo.gl/4W7J0r
+build_message_set(Message, Compression) when is_binary(Message) ->
+  build_message(Message);
 build_message_set(Messages, Compression) ->
   build_message_set(Messages, Compression, {0, []}).
 
@@ -344,10 +364,12 @@ parse_steps(Bin, CorrelationId, [Step | T], Data) ->
       parse_steps(NewBin, CorrelationId, T, NewData);
     {incomplete, NewData, {NewBin, Steps}} ->
       NewState = {NewBin, CorrelationId, Steps ++ T},
-      {incomplete, CorrelationId, add_context_to_data(NewData, Steps ++ T), NewState};
+      DataWithContext = add_context_to_data(NewData, Steps ++ T),
+      {incomplete, CorrelationId, DataWithContext, NewState};
     {incomplete, Steps} ->
       NewState = {Bin, CorrelationId, Steps ++ T},
-      {incomplete, CorrelationId, add_context_to_data(Data, Steps ++ T), NewState};
+      DataWithContext = add_context_to_data(Data, Steps ++ T),
+      {incomplete, CorrelationId, DataWithContext, NewState};
     {add_steps, NewBin, NewData, Steps} ->
       parse_steps(NewBin, CorrelationId, Steps ++ T, Data);
     Error = {error, _Reason} ->
