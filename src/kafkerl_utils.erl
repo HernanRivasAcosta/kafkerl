@@ -8,7 +8,7 @@
 %%==============================================================================
 %% API
 %%==============================================================================
-callback(Callback, []) ->
+callback(_Callback, []) ->
   ok;
 callback(Callback, Data) ->
   do_callback(kafka_message, Callback, Data).
@@ -24,8 +24,11 @@ do_callback(_Type, {M, F}, Data) ->
 do_callback(_Type, {M, F, A}, Data) ->
   spawn(fun() -> apply(M, F, A ++ [Data]) end),
   ok;
-do_callback(Type, Pid, Data) ->
+do_callback(Type, Pid, Data) when is_pid(Pid) ->
   Pid ! {Type, Data},
+  ok;
+do_callback(_Type, Function, Data) when is_function(Function, 1) ->
+  Function(Data),
   ok.
 
 do_callback(_Type, {M, F}, Metadata, Data) ->
@@ -34,6 +37,9 @@ do_callback(_Type, {M, F}, Metadata, Data) ->
 do_callback(_Type, {M, F, A}, Metadata, Data) ->
   spawn(fun() -> apply(M, F, A ++ [Metadata, Data]) end),
   ok;
-do_callback(Type, Pid, Metadata, Data) ->
+do_callback(Type, Pid, Metadata, Data) when is_pid(Pid) ->
   Pid ! {Type, Metadata, Data},
+  ok;
+do_callback(_Type, Function, Metadata, Data) when is_function(Function, 2) ->
+  Function(Metadata, Data),
   ok.
