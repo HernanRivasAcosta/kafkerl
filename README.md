@@ -9,8 +9,10 @@ Apache Kafka high performance producer/consumer for erlang
  - Multiple simultaneous TCP connections to Kafka servers allowing for different cache policies depending on the requirements, for example, flush instantly on a producer designed for large yet sporadic messages but cache N messages before sending when multiple small messages are expected.
  - Highly concurrent using @jaynel concurrency tools.
  - Never lose a message! Different configurable strategies to deal with possible downtime of the kafka server ensures that those messages are saved to disk or sent somewhere else.
+ - The message parser can handle the partial messages sent by the kafka server (as detailed [here](https://cwiki.apache.org/confluence/display/KAFKA/A+Guide+To+The+Kafka+Protocol#AGuideToTheKafkaProtocol-FetchAPI)) without having to wait for the server to send all data, meaning kafkerl can consume millons of messages without an issue. 
+ - Flexible API allows consumer of messages to define pids, funs or M:F pairs as callbacks of each message.
 
-***Note that not all of this are implemented***
+***Note that @jaynel's concurrency tools are yet to be implemented***
 
 ##Configuration
 
