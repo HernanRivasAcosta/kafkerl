@@ -9,6 +9,9 @@
 
 -type producer_config() :: any().
 -type consumer_config() :: any().
+-type restart_strategy() :: {supervisor:strategy(),
+                             non_neg_integer(),
+                             non_neg_integer()}.
 
 %%==============================================================================
 %% API
@@ -21,7 +24,6 @@ start_link() ->
 %%==============================================================================
 %% Utils
 %%==============================================================================
--type restart_strategy() :: {supervisor:strategy(), integer(), integer()}.
 -spec init({[producer_config()], [consumer_config()]}) ->
   {ok, {restart_strategy(), [supervisor:child_spec()]}}.
 init({ProducerConfigs, ConsumerConfigs}) ->

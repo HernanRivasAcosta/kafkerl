@@ -23,7 +23,7 @@
                 correlation_id         = 0 :: integer(),
                 parsing_state       = void :: kafkerl_state() | void | pending,
                 pending_requests      = [] :: [pending_request()],
-                callback       = undefined :: kafkerl_callback()}).
+                callback       = undefined :: undefined | kafkerl_callback()}).
 
 -type state() :: #state{}.
 -type start_link_response() :: {ok, pid()} | ignore | {error, any()}.

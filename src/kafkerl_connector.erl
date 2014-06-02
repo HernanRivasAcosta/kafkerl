@@ -28,7 +28,7 @@
 
 -type state() :: #state{}.
 -type start_link_response() :: {ok, pid()} | ignore | {error, any()}.
--type valid_call_message() :: {message, binary()} |
+-type valid_call_message() :: {message, iolist()} |
                               {add_tcp_listener, pid()} |
                               {remove_tcp_listener, pid()}.            
 -type valid_info_message() :: {tcp_closed, any()} |
@@ -50,20 +50,20 @@ start_link(undefined, Config) ->
 start_link(Name, Config) ->
   gen_server:start_link({local, Name}, ?MODULE, [Config], []).
 
--spec send(binary()) -> ok | {error, any()}.
-send(Bin) ->
-  send(?MODULE, Bin).
--spec send(atom(), binary()) -> ok | {error, any()};
+-spec send(iolist()) -> ok | {error, any()}.
+send(IOList) ->
+  send(?MODULE, IOList).
+-spec send(atom(), iolist()) -> ok | {error, any()};
           (binary(), integer() | infinity) -> ok | {error, any()}.
-send(undefined, Bin) ->
-  send(?MODULE, Bin, infinity);
-send(Name, Bin) when is_atom(Name) ->
-  send(Name, Bin, infinity);
-send(Bin, Timeout) ->
-  send(?MODULE, Bin, Timeout).
--spec send(atom(), binary(), integer() | infinity) -> ok | {error, any()}.
-send(Name, Bin, Timeout) ->
-  gen_server:call(Name, {send, Bin}, Timeout).
+send(undefined, IOList) ->
+  send(?MODULE, IOList, infinity);
+send(Name, IOList) when is_atom(Name) ->
+  send(Name, IOList, infinity);
+send(IOList, Timeout) ->
+  send(?MODULE, IOList, Timeout).
+-spec send(atom(), iolist(), integer() | infinity) -> ok | {error, any()}.
+send(Name, IOList, Timeout) ->
+  gen_server:call(Name, {send, IOList}, Timeout).
 
 -spec add_tcp_listener(pid()) -> ok.
 add_tcp_listener(Pid) ->
@@ -82,7 +82,7 @@ remove_tcp_listener(Name, Pid) ->
 % gen_server callbacks
 -spec handle_call(valid_call_message(), any(), state()) ->
   {reply, ok, state()} |
-  {reply, {error, any(), state()}}.
+  {reply, {error, any()}, state()}.
 handle_call({send, Bin}, _From, State) ->
   {reply, handle_send(Bin, State), State};
 handle_call({add_tcp_listener, Pid}, _From,
@@ -158,12 +158,12 @@ init([Config]) ->
       {stop, bad_config}
   end.
 
-handle_send(_Bin, #state{socket = undefined}) ->
+handle_send(_IOList, #state{socket = undefined}) ->
   % Maybe cache the binary
   lager:info("ignoring send"),
   ok;
-handle_send(Bin, #state{socket = Socket}) ->
-  case gen_tcp:send(Socket, Bin) of
+handle_send(IOList, #state{socket = Socket}) ->
+  case gen_tcp:send(Socket, IOList) of
     {error, Reason} ->
       lager:warning("Unable to write to socket, reason: ~p", [Reason]),
       {error, Reason};

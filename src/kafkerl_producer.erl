@@ -88,7 +88,7 @@ send_message_validated(Name, Data, Timeout) ->
 % gen_server callbacks
 -spec handle_call(valid_call_message(), any(), state()) ->
   {reply, ok, state()} |
-  {reply, {error, any(), state()}}.
+  {reply, {error, any()}, state()}.
 handle_call({send_message, Message}, _From,
             State = #state{correlation_id = CorrelationId}) ->
   case handle_send_message(Message, State) of

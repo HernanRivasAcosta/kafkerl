@@ -175,9 +175,7 @@ get_message_header(MessageSize, Compression) ->
 
 compression_to_int(?KAFKERL_COMPRESSION_NONE)   -> 0;
 compression_to_int(?KAFKERL_COMPRESSION_GZIP)   -> 1;
-compression_to_int(?KAFKERL_COMPRESSION_SNAPPY) -> 2;
-% Error handling
-compression_to_int(Other) -> lager:error("invalid compression ~p", [Other]), 0.
+compression_to_int(?KAFKERL_COMPRESSION_SNAPPY) -> 2.
 
 compress(?KAFKERL_COMPRESSION_NONE,   Data) -> Data;
 compress(?KAFKERL_COMPRESSION_GZIP,   Data) -> Data;

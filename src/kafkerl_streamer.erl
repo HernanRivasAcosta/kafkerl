@@ -20,7 +20,7 @@
 
 -record(state, {consumer  = undefined :: atom() | undefined,
                 offset            = 0 :: integer(),
-                request   = undefined :: stream_request(),
+                request   = undefined :: stream_request() | undefined,
                 callback  = undefined :: kafkerl_callback() | undefined,
                 timeout        = 1000 :: integer(),
                 timer_ref = undefined :: any() | undefined, %% any() is a tref()
