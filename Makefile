@@ -1,6 +1,7 @@
 COOKIE ?= KAFKERL-EXAMPLE
 CONFIG ?= rel/kafkerl.app.config
-RUN := erl -pa ebin -pa deps/*/ebin -smp enable -s lager -s kafkerl -setcookie ${COOKIE} -config ${CONFIG} -boot start_sasl ${ERL_ARGS}
+ERL ?= erl
+RUN := ${ERL} -pa ebin -pa deps/*/ebin -smp enable -s lager -s kafkerl -setcookie ${COOKIE} -config ${CONFIG} -boot start_sasl ${ERL_ARGS}
 NODE ?= kafkerl
 CT_ARGS ?= "-vvv"
 CT_LOG ?= /logs/ct
@@ -22,13 +23,15 @@ endif
 clean:
 	${REBAR} clean
 
-quick:
+compile:
 	${REBAR} skip_deps=true compile
 
-shell: quick
+shell:
 	if [ -n "${NODE}" ]; then ${RUN} -name ${NODE}@`hostname`; \
 	else ${RUN}; \
 	fi
+
+all: compile shell
 
 test: tests
 
