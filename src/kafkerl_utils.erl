@@ -2,7 +2,9 @@
 -author('hernanrivasacosta@gmail.com').
 
 -export([callback/2, callback/3, error/2]).
+-export([get_tcp_options/1]).
 
+-include("kafkerl.hrl").
 -include("kafkerl_consumers.hrl").
 
 %%==============================================================================
@@ -43,3 +45,6 @@ do_callback(Type, Pid, Metadata, Data) when is_pid(Pid) ->
 do_callback(_Type, Function, Metadata, Data) when is_function(Function, 2) ->
   Function(Metadata, Data),
   ok.
+
+get_tcp_options(Options) -> % TODO: refactor
+  lists:ukeymerge(1, lists:sort(proplists:unfold(Options)), ?DEFAULT_TCP_OPTS).
