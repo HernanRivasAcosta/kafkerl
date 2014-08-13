@@ -4,11 +4,11 @@
 -behaviour(gen_server).
 
 %% API
--export([send/1, send/2, request_metadata/0, request_metadata/1]).
+-export([send/2, send/3, request_metadata/1, get_partitions/1]).
 % Only for internal use
 -export([request_metadata/6]).
 % Supervisors
--export([start_link/1, start_link/2]).
+-export([start_link/2]).
 % gen_server callbacks
 -export([init/1, terminate/2, code_change/3,
          handle_call/3, handle_cast/2, handle_info/2]).
@@ -18,8 +18,8 @@
 -type start_link_response() :: {ok, pid()} | ignore | error().
 
 -type server_ref()          :: atom() | pid().
--type broker_mapping_key()   :: {topic(), partition()}.
--type broker_mapping()       :: {broker_mapping_key(), server_ref()}.
+-type broker_mapping_key()  :: {topic(), partition()}.
+-type broker_mapping()      :: {broker_mapping_key(), server_ref()}.
 
 -record(state, {brokers                 = [] :: [socket_address()],
                 broker_mapping        = void :: [broker_mapping()] | void,
@@ -34,45 +34,42 @@
 %%==============================================================================
 %% API
 %%==============================================================================
--spec start_link(any()) -> start_link_response().
-start_link(Config) ->
-  start_link(?MODULE, Config).
 -spec start_link(atom(), any()) -> start_link_response().
-start_link(undefined, Config) ->
-  start_link(Config);
 start_link(Name, Config) ->
   gen_server:start_link({local, Name}, ?MODULE, [Config], []).
 
--spec send(basic_message()) -> ok | error().
-send(Message) ->
-  send(?MODULE, Message).
--spec send(server_ref(), basic_message()) -> ok | error();
-          (binary(), integer() | infinity)  -> ok | error().
-send(undefined, Message) ->
-  send(?MODULE, Message, infinity);
+-spec send(server_ref(), basic_message()) -> ok | error().
 send(ServerRef, Message) when is_atom(ServerRef) ->
-  send(ServerRef, Message, 5000);
-send(Message, Timeout) ->
-  send(?MODULE, Message, Timeout).
+  send(ServerRef, Message, 1000).
 -spec send(server_ref(), basic_message(), integer() | infinity) -> ok | error().
 send(ServerRef, Message, Timeout) ->
   gen_server:call(ServerRef, {send, Message}, Timeout).
 
--spec request_metadata() -> ok.
-request_metadata() ->
-  request_metadata(?MODULE).
+-spec get_partitions(server_ref()) -> [{topic(), [partition()]}] | error().
+get_partitions(ServerRef) ->
+  case gen_server:call(ServerRef, {get_partitions}) of
+    {ok, Mapping} ->
+      % Perform this here to avoid locking the gen_server on this
+      reverse_topic_mapping(Mapping);
+    Error ->
+      Error
+  end.
+
 -spec request_metadata(server_ref()) -> ok.
 request_metadata(ServerRef) ->
   gen_server:call(ServerRef, {request_metadata}).
 
-% gen_server callbacks
+%%==============================================================================
+%% gen_server callbacks
+%%==============================================================================
 -spec handle_call(any(), any(), state()) -> {reply, ok, state()} |
                                             {reply, {error, any()}, state()}.
 handle_call({send, Message}, _From, State) ->
   {reply, handle_send(Message, State), State};
 handle_call({request_metadata}, _From, State) ->
-  {Ok, NewState} = handle_request_metadata(State),
-  {reply, Ok, NewState}.
+  {reply, ok, handle_request_metadata(State)};
+handle_call({get_partitions}, _From, State) ->
+  {reply, handle_get_partitions(State), State}.
 
 handle_info(metadata_timeout, State) ->
   {stop, {error, unable_to_retrieve_metadata}, State};
@@ -130,14 +127,20 @@ handle_send(Message, #state{broker_mapping = Mapping}) ->
   case lists:keyfind({Topic, Partition}, 1, Mapping) of
     false ->
       lager:error("Dropping ~p sent to topic ~p, partition ~p, reason: ~p",
-                  [Payload, Topic, Partition, no_broker]);
+                  [Payload, Topic, Partition, no_broker]),
+      {error, invalid_topic_or_partition};
     {_, Broker} ->
       kafkerl_broker_connection:send(Broker, Message)
   end.
 
-% If the topic mapping is void then we are already requesting the metadata
+handle_get_partitions(#state{broker_mapping = void}) ->
+  {error, not_available};
+handle_get_partitions(#state{broker_mapping = Mapping}) ->
+  {ok, Mapping}.
+
+% Ignore it if the topic mapping is void, we are already requesting the metadata
 handle_request_metadata(State = #state{broker_mapping = void}) ->
-  {ok, State};
+  State;
 handle_request_metadata(State = #state{brokers = Brokers,
                                        retry_interval = RetryInterval,
                                        max_metadata_retries = MaxRetries}) ->
@@ -145,7 +148,7 @@ handle_request_metadata(State = #state{brokers = Brokers,
   Params = [self(), Brokers, get_metadata_tcp_options(), MaxRetries,
             RetryInterval, Request],
   _Pid = spawn_link(?MODULE, request_metadata, Params),
-  {ok, State#state{broker_mapping = void}}.
+  State#state{broker_mapping = void}.
 
 %%==============================================================================
 %% Utils
@@ -272,6 +275,18 @@ start_broker_connection(N, Address, Config) ->
   NewConn = kafkerl_broker_connection:start_link(N, self(), Address, Config),
   {ok, Name, _Pid} = NewConn,
   Name.
+
+% This is used to return the available partitions for each topic
+reverse_topic_mapping(Mapping) ->
+  F = fun({{Topic, Partition}, _}, Acc) ->
+        case lists:keytake(Topic, 1, Acc) of
+          false ->
+            [{Topic, [Partition]} | Acc];
+          {value, {Topic, Partitions}, NewAcc} ->
+            [{Topic, [Partition | Partitions]} | NewAcc]
+        end
+      end,
+  lists:foldl(F, [], Mapping).
 
 %%==============================================================================
 %% Error handling

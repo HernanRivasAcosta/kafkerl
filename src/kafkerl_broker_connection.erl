@@ -55,7 +55,9 @@ send(ServerRef, Message) ->
 flush(ServerRef) ->
   gen_server:call(ServerRef, {flush}).
 
-% gen_server callbacks
+%%==============================================================================
+%% gen_server callbacks
+%%==============================================================================
 -spec handle_call(any(), any(), state()) -> {reply, ok, state()}.
 handle_call({send, Message}, _From, State) ->
   handle_send(Message, State);
