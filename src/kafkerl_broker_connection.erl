@@ -16,7 +16,7 @@
 -include("kafkerl.hrl").
 
 -type server_ref()          :: atom() | pid().
--type conn_idx()           :: 0..1023.
+-type conn_idx()            :: 0..1023.
 -type start_link_response() :: {ok, atom(), pid()} | ignore | {error, any()}.
 
 -record(state, {conn_idx  = undefined :: conn_idx(),
@@ -68,7 +68,8 @@ handle_info({connected, Socket}, State) ->
   {noreply, NewState};
 handle_info(connection_timeout, State) ->
   {stop, {error, unable_to_connect}, State};
-handle_info({tcp_closed, _Socket}, State) ->
+handle_info({tcp_closed, _Socket}, State = #state{address = {Host, Port}}) ->
+  lager:warning("lost connection to ~p:~p", [Host, Port]),
   NewState = handle_tcp_close(State),
   {noreply, NewState};
 handle_info({tcp, _Socket, Bin}, State) ->
@@ -96,7 +97,7 @@ init([Id, Connector, Address, Config]) ->
             {client_id, binary, {default, <<"kafkerl_client">>}}],
   case normalizerl:normalize_proplist(Schema, Config) of
     {ok, [TCPOpts, RetryInterval, MaxRetries, ClientId]} ->
-      NewTCPOpts = get_tcp_options(TCPOpts),
+      NewTCPOpts = kafkerl_utils:get_tcp_options(TCPOpts),
       State = #state{conn_idx = Id, address = Address, connector = Connector,
                      max_retries = MaxRetries, retry_interval = RetryInterval,
                      tcp_options = NewTCPOpts, client_id = ClientId},
@@ -125,27 +126,27 @@ handle_flush(State = #state{socket = Socket, conn_idx = ConnIdx,
   {ok, CorrelationId, NewState} = build_correlation_id(State),
   BuiltRequest = kafkerl_buffer:build_request(ConnIdx, ClientId, CorrelationId,
                                               ?COMPRESSION_NONE),
-  ok = case BuiltRequest of
-         {ok, void} ->
-           ok;
-         {ok, IOList} ->
-           case gen_tcp:send(Socket, IOList) of
-             {error, Reason} ->
-               lager:warning("unable to write to socket, reason: ~p", [Reason]),
-               gen_tcp:close(Socket),
-               reconnect;
-             ok ->
-               ok
-           end
-       end,
-  {reply, ok, NewState}.
+  case BuiltRequest of
+    {ok, void} ->
+      {reply, ok, NewState};
+    {ok, IOList} ->
+      lager:debug("Sending ~p", [IOList]),
+      case gen_tcp:send(Socket, IOList) of
+        {error, Reason} ->
+          lager:warning("unable to write to socket, reason: ~p", [Reason]),
+          gen_tcp:close(Socket),
+          {reply, ok, handle_tcp_close(NewState)};
+        ok ->
+          lager:debug("message ~p sent", [CorrelationId]),
+          {reply, ok, NewState}
+      end
+  end.
 
 % TCP Handlers
 handle_tcp_close(State = #state{retry_interval = RetryInterval,
                                 tcp_options = TCPOpts,
                                 max_retries = MaxRetries,
                                 address = Address}) ->
-  lager:warning("lost connection to ~p:~p"),
   Params = [self(), TCPOpts, Address, RetryInterval, MaxRetries],
   _Pid = spawn_link(?MODULE, connect, Params),
   State#state{socket = undefined}.
@@ -179,9 +180,6 @@ handle_tcp_data(Bin, State = #state{connector = Connector}) ->
 %%==============================================================================
 %% Utils
 %%==============================================================================
-get_tcp_options(Options) -> % TODO: refactor
-  lists:ukeymerge(1, lists:sort(proplists:unfold(Options)), ?DEFAULT_TCP_OPTS).
-
 build_correlation_id(State = #state{request_number = RequestNumber,
                                     conn_idx = ConnIdx}) ->
   % CorrelationIds are 32 bit integers, of those, the first 10 bits are used for
@@ -191,9 +189,6 @@ build_correlation_id(State = #state{request_number = RequestNumber,
                   true -> 0;
                   false -> RequestNumber + 1
                 end,
-  lager:notice("ConnIdx: ~p", [ConnIdx]),
-  lager:notice("(ConnIdx bsl 22): ~p", [(ConnIdx bsl 22)]),
-  lager:notice("NextRequest: ~p", [NextRequest]),
   CorrelationId = (ConnIdx bsl 22) bor NextRequest,
   {ok, CorrelationId, State#state{request_number = NextRequest}}.
 
@@ -234,12 +229,14 @@ get_message_for_error(Topic, Partition, [_Message | T]) ->
   get_message_for_error(Topic, Partition, T).
 
 connect(Pid, _TCPOpts, {Host, Port} = _Address, _Timeout, 0) ->
-  lager:error("unable to connect to ~p:~p", [Host, Port]),
+  lager:error("Unable to connect to ~p:~p", [Host, Port]),
   Pid ! connection_timeout;
 connect(Pid, TCPOpts, {Host, Port} = Address, Timeout, Retries) ->
   lager:debug("Attempting connection to broker at ~p:~p", [Host, Port]),
-  case gen_tcp:connect(binary_to_list(Host), Port, TCPOpts, 1000) of
+  case gen_tcp:connect(Host, Port, TCPOpts, 5000) of
     {ok, Socket} ->
+      lager:debug("Connnected to ~p:~p", [Host, Port]),
+      gen_tcp:controlling_process(Socket, Pid),
       Pid ! {connected, Socket};
     {error, Reason} ->
       NewRetries = Retries - 1,

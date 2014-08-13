@@ -2,7 +2,6 @@
 -author('hernanrivasacosta@gmail.com').
 
 -export([start/0, start/2]).
-%% Ease of access API
 -export([produce/1, produce/2]).
 
 -include("kafkerl.hrl").

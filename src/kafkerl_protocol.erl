@@ -318,7 +318,7 @@ parse_produced_topics(Count, Bin) ->
 parse_produced_topics(Count, <<>>, Acc) when Count =< 0 ->
   {ok, lists:reverse(Acc)};
 parse_produced_topics(Count, Bin, Acc) when Count =< 0 ->
-  lager:warning("finished parsing produce response, ignoring bytes: ~p", [Bin]),
+  lager:warning("Finished parsing produce response, ignoring bytes: ~p", [Bin]),
   {ok, lists:reverse(Acc)};
 parse_produced_topics(Count, <<TopicNameLength:16/unsigned-integer,
                                TopicName:TopicNameLength/binary,
@@ -348,7 +348,7 @@ parse_topics(Count, Bin) ->
 parse_topics(Count, <<>>, Acc) when Count =< 0 ->
   {ok, lists:reverse(Acc)};
 parse_topics(Count, Bin, Acc) when Count =< 0 ->
-  lager:warning("finished parsing topics, ignoring bytes: ~p", [Bin]),
+  lager:warning("Finished parsing topics, ignoring bytes: ~p", [Bin]),
   {ok, lists:reverse(Acc)};
 parse_topics(Count, Bin, Acc) ->
   case parse_topic(Bin) of
@@ -459,7 +459,8 @@ parse_brokers(Count, <<Id:32/unsigned-integer,
                        Host:HostLength/binary,
                        Port:32/unsigned-integer,
                        Remainder/binary>>, Acc) ->
-  parse_brokers(Count - 1, Remainder, [{Id, {Host, Port}} | Acc]).
+  HostStr = binary_to_list(Host),
+  parse_brokers(Count - 1, Remainder, [{Id, {HostStr, Port}} | Acc]).
 
 parse_topic_metadata(Count, Bin) ->
   parse_topic_metadata(Count, Bin, []).
@@ -467,7 +468,7 @@ parse_topic_metadata(Count, Bin) ->
 parse_topic_metadata(Count, <<>>, Acc) when Count =< 0 ->
   {ok, lists:reverse(Acc)};
 parse_topic_metadata(Count, Bin, Acc) when Count =< 0 ->
-  lager:warning("finished parsing topic metadata, ignoring bytes: ~p", [Bin]),
+  lager:warning("Finished parsing topic metadata, ignoring bytes: ~p", [Bin]),
   {ok, lists:reverse(Acc)};
 parse_topic_metadata(Count, <<ErrorCode:16/unsigned-integer,
                               TopicSize:16/unsigned-integer,

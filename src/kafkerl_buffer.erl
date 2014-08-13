@@ -42,7 +42,8 @@ build_request(Broker, ClientId, CorrelationId, Compression) ->
     {ok, []} ->
       {ok, void};
     {ok, Messages} ->
-      Request = kafkerl_protocol:build_produce_request(Messages,
+      MergedMessages = merge_topics(Messages),
+      Request = kafkerl_protocol:build_produce_request(MergedMessages,
                                                        ClientId,
                                                        CorrelationId,
                                                        Compression),
@@ -102,10 +103,11 @@ init([Config]) ->
 
 handle_buffer(Broker, Message, State = #state{message_buffer = Messages,
                                               max_queue_size = MaxQueueSize}) ->
-  F = fun(undefined) -> [Message];
-         (L) -> [Message | L] end,
-  NewMessages = update_proplist(Broker, F, Messages),
-  ShouldFlush = length(NewMessages) >= MaxQueueSize,
+  FormattedMessage = format_message(Message),
+  F = fun(undefined) -> {1, [FormattedMessage]};
+         (L)         -> {length(L) + 1, [FormattedMessage | L]} end,
+  {NewMessagesCount, NewMessages} = update_proplist(Broker, F, Messages),
+  ShouldFlush = NewMessagesCount >= MaxQueueSize,
   {reply, {ok, ShouldFlush}, State#state{message_buffer = NewMessages}}.
 
 handle_get_buffer(Broker, State = #state{message_buffer = Messages}) ->
@@ -114,7 +116,6 @@ handle_get_buffer(Broker, State = #state{message_buffer = Messages}) ->
       {reply, {ok, []}, State};
     {value, {_, Value}, NewMessages} ->
       NewState = State#state{message_buffer = NewMessages},
-      lager:notice("Value: ~p", [Value]),
       {reply, {ok, lists:reverse(Value)}, NewState}
   end.
 
@@ -142,12 +143,55 @@ handle_delete_saved_request(CorrelationId,
 %%==============================================================================
 %% Utils
 %%==============================================================================
+format_message({Topic, Partitions}) when is_list(Partitions) ->
+  {Topic, Partitions};
+format_message({Topic, Partition}) ->
+  {Topic, [Partition]};
+format_message({Topic, Partition, Messages}) when is_list(Messages) ->
+  {Topic, [{Partition, Messages}]};
+format_message({Topic, Partition, Message}) ->
+  {Topic, [{Partition, [Message]}]}.
+
 update_proplist(Key, Fun, Proplist) ->
   update_proplist(Key, Fun, Proplist, []).
-
 update_proplist(Key, Fun, [], Acc) ->
-  lists:reverse([{Key, Fun(undefined)} | Acc]);
+  {Count, List} = Fun(undefined),
+  {Count, lists:reverse([{Key, List} | Acc])};
 update_proplist(Key, Fun, [{Key, Value} | T], Acc) ->
-  lists:reverse([{Key, Fun(Value)} | Acc], T);
+  {Count, List} = Fun(Value),
+  {Count, lists:reverse([{Key, List} | Acc], T)};
 update_proplist(Key, Fun, [H | T], Acc) ->
   update_proplist(Key, Fun, T, [H | Acc]).
+
+merge_topics(Topics) ->
+  merge_topics(Topics, []).
+merge_topics([], Acc) ->
+  Acc;
+merge_topics([H | T], Acc) ->
+  merge_topics(T, merge_topic(H, Acc)).
+
+merge_topic(Topic, Topics) ->
+  merge_topic(Topic, Topics, []).
+merge_topic(Topic, [], Acc) ->
+  lists:reverse([Topic | Acc]);
+merge_topic({Topic, NewPartitions}, [{Topic, Partitions} | T], Acc) ->
+  MergedPartitions = merge_partitions(NewPartitions ++ Partitions),
+  lists:reverse(Acc, [{Topic, MergedPartitions} | T]);
+merge_topic(Topic, [H | T], Acc) ->
+  merge_topic(Topic, T, [H | Acc]).
+
+merge_partitions(Partitions) ->
+  merge_partitions(Partitions, []).
+merge_partitions([], Acc) ->
+  Acc;
+merge_partitions([H | T], Acc) ->
+  merge_partitions(T, merge_partition(H, Acc)).
+
+merge_partition(Partition, Partitions) ->
+  merge_partition(Partition, Partitions, []).
+merge_partition(Partition, [], Acc) ->
+  lists:reverse([Partition | Acc]);
+merge_partition({Partition, NewMessages}, [{Partition, Messages} | T], Acc) ->
+  lists:reverse(Acc, [{Partition, NewMessages ++ Messages} | T]);
+merge_partition(Topic, [H | T], Acc) ->
+  merge_partition(Topic, T, [H | Acc]).

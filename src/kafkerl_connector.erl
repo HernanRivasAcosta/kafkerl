@@ -21,13 +21,14 @@
 -type broker_mapping_key()   :: {topic(), partition()}.
 -type broker_mapping()       :: {broker_mapping_key(), server_ref()}.
 
--record(state, {brokers              = [] :: [socket_address()],
-                broker_mapping     = void :: [broker_mapping()] | void,
-                client_id          = <<>> :: client_id(),
-                topics               = [] :: [topic()],
-                max_metadata_retries = -1 :: integer(),
-                retry_interval        = 1 :: non_neg_integer(),
-                config               = [] :: {atom(), any()}}).
+-record(state, {brokers                 = [] :: [socket_address()],
+                broker_mapping        = void :: [broker_mapping()] | void,
+                client_id             = <<>> :: client_id(),
+                topics                  = [] :: [topic()],
+                max_metadata_retries    = -1 :: integer(),
+                retry_interval           = 1 :: non_neg_integer(),
+                config                  = [] :: {atom(), any()},
+                retry_on_topic_error = false :: boolean()}).
 -type state() :: #state{}.
 
 %%==============================================================================
@@ -77,10 +78,10 @@ handle_info(metadata_timeout, State) ->
   {stop, {error, unable_to_retrieve_metadata}, State};
 handle_info({metadata_updated, TopicMapping}, State) ->
   BrokerMapping = get_broker_mapping(TopicMapping, State),
-  lager:info("refreshed topic mapping: ~p", [BrokerMapping]),
+  lager:debug("Refreshed topic mapping: ~p", [BrokerMapping]),
   {noreply, State#state{broker_mapping = BrokerMapping}};
 handle_info(Msg, State) ->
-  lager:warning("unexpected info message received: ~p on ~p", [Msg, State]),
+  lager:notice("Unexpected info message received: ~p on ~p", [Msg, State]),
   {noreply, State}.
 
 % Boilerplate
@@ -99,15 +100,18 @@ init([Config]) ->
             {max_metadata_retries, {integer, {-1, undefined}}, {default, -1}},
             {client_id, binary, {default, <<"kafkerl_client">>}},
             {topics, [binary], required},
-            {metadata_tcp_timeout, {integer, {1, undefined}}, {default, 1500}}],
+            {metadata_tcp_timeout, {integer, {1, undefined}}, {default, 1500}},
+            {retry_on_topic_error, boolean, {default, false}}],
   case normalizerl:normalize_proplist(Schema, Config) of
-    {ok, [Brokers, MaxMetadataRetries, ClientId, Topics, RetryInterval]} ->
-      State = #state{brokers = Brokers,
-                     topics = Topics,
-                     client_id = ClientId,
-                     max_metadata_retries = MaxMetadataRetries,
-                     retry_interval = RetryInterval,
-                     config = Config},
+    {ok, [Brokers, MaxMetadataRetries, ClientId, Topics, RetryInterval,
+          RetryOnTopicError]} ->
+      State = #state{config               = Config,
+                     topics               = Topics,
+                     brokers              = Brokers,
+                     client_id            = ClientId,
+                     retry_interval       = RetryInterval,
+                     retry_on_topic_error = RetryOnTopicError,
+                     max_metadata_retries = MaxMetadataRetries},
       Request = metadata_request(State),
       % Start requesting metadata
       Params = [self(), Brokers, get_metadata_tcp_options(), MaxMetadataRetries,
@@ -116,7 +120,7 @@ init([Config]) ->
       {ok, State};
     {errors, Errors} ->
       lists:foreach(fun(E) ->
-                      lager:critical("connector config error ~p", [E])
+                      lager:critical("Connector config error ~p", [E])
                     end, Errors),
       {stop, bad_config}
   end.
@@ -125,7 +129,7 @@ handle_send(Message, #state{broker_mapping = Mapping}) ->
   {Topic, Partition, Payload} = Message,
   case lists:keyfind({Topic, Partition}, 1, Mapping) of
     false ->
-      lager:error("dropping ~p sent to topic ~p, partition ~p, reason: ~p",
+      lager:error("Dropping ~p sent to topic ~p, partition ~p, reason: ~p",
                   [Payload, Topic, Partition, no_broker]);
     {_, Broker} ->
       kafkerl_broker_connection:send(Broker, Message)
@@ -146,11 +150,8 @@ handle_request_metadata(State = #state{brokers = Brokers,
 %%==============================================================================
 %% Utils
 %%==============================================================================
-get_tcp_options(Options) -> % TODO: refactor
-  lists:ukeymerge(1, lists:sort(proplists:unfold(Options)), ?DEFAULT_TCP_OPTS).
-
 get_metadata_tcp_options() ->
-  get_tcp_options([{active, false}]).
+  kafkerl_utils:get_tcp_options([{active, false}]).
 
 request_metadata(Pid, _Brokers, _TCPOpts, 0, _RetryInterval, _Request) ->
   Pid ! metadata_timeout;
@@ -234,7 +235,7 @@ get_topic_mapping({BrokerMetadata, TopicMetadata}) ->
 expand_topic({0, Topic, Partitions}) ->
   {true, {Topic, Partitions}};
 expand_topic({Error, Topic, _Partitions}) ->
-  lager:error("error ~p on metadata for topic ~p",
+  lager:error("Error ~p on metadata for topic ~p",
               [kafkerl_error:get_error_name(Error), Topic]),
   false.
 
@@ -247,7 +248,7 @@ expand_partitions({Topic, [{0, Partition, Leader, _, _} | T]}, Acc) ->
   ExpandedPartition = {{Topic, Partition}, Leader},
   expand_partitions({Topic, T}, [ExpandedPartition | Acc]);
 expand_partitions({Topic, [{Error, Partition, _, _, _} | T]}, Acc) ->
-  lager:error("error ~p on metadata for topic ~p, partition ~p",
+  lager:error("Error ~p on metadata for topic ~p, partition ~p",
               [kafkerl_error:get_error_name(Error), Topic, Partition]),
   expand_partitions({Topic, T}, Acc).
 
@@ -276,5 +277,5 @@ start_broker_connection(N, Address, Config) ->
 %% Error handling
 %%==============================================================================
 warn_metadata_request(Host, Port, Reason) ->
-  lager:warning("unable to retrieve metadata from ~s:~p, reason: ~p",
+  lager:warning("Unable to retrieve metadata from ~s:~p, reason: ~p",
                 [Host, Port, Reason]).

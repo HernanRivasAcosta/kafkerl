@@ -20,9 +20,9 @@
 -type correlation_id() :: non_neg_integer().
 
 %% Connection
--type host()           :: binary() | string().
--type port()           :: 1..65535.
--type socket_address() :: {host(), port()}.
+-type address_host()   :: string().
+-type address_port()   :: 1..65535.
+-type socket_address() :: {address_host(), address_port()}.
 -type broker_id()      :: integer().
 -type broker()         :: {broker_id(), socket_address()}.
 
