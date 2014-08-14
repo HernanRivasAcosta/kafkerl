@@ -279,7 +279,7 @@ expand_topic({0, Topic, Partitions}) ->
 expand_topic({Error, Topic, _Partitions}) ->
   lager:error("Error ~p on metadata for topic ~p",
               [kafkerl_error:get_error_name(Error), Topic]),
-  false.
+  {true, {Topic, []}}.
 
 expand_partitions(Metadata) ->
   expand_partitions(Metadata, []).
@@ -315,7 +315,8 @@ start_broker_connection(N, Address, Config) ->
     {ok, Name, _Pid} ->
       Name;
     {error, {already_started, Pid}} ->
-      Pid
+      kafkerl_broker_connection:kill(Pid),
+      start_broker_connection(N, Address, Config)
   end.
 
 % This is used to return the available partitions for each topic
