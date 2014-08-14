@@ -2,7 +2,9 @@
 -author('hernanrivasacosta@gmail.com').
 
 -export([start/0, start/2]).
--export([produce/1, produce/2, get_partitions/0, get_partitions/1]).
+-export([produce/1, produce/2,
+         get_partitions/0, get_partitions/1,
+         subscribe/1, subscribe/2]).
 
 -include("kafkerl.hrl").
 -include("kafkerl_consumers.hrl").
@@ -33,3 +35,17 @@ get_partitions() ->
 -spec get_partitions(atom()) -> [{topic(), [partition()]}] | error().
 get_partitions(Name) ->
   kafkerl_connector:get_partitions(Name).
+
+-spec subscribe(callback()) -> ok.
+subscribe(Callback) ->
+  subscribe(?MODULE, Callback).
+-spec subscribe(atom(), callback()) -> ok.
+subscribe(Name, Callback) ->
+  kafkerl_connector:subscribe(Name, Callback).
+
+-spec unsubscribe(callback()) -> ok.
+unsubscribe(Callback) ->
+  unsubscribe(?MODULE, Callback).
+-spec unsubscribe(atom(), callback()) -> ok.
+unsubscribe(Name, Callback) ->
+  kafkerl_connector:unsubscribe(Name, Callback).

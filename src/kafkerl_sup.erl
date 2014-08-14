@@ -29,7 +29,10 @@ init([]) ->
                                get_buffer_child_spec()]}}.
 
 get_connector_child_spec() ->
-  {ok, Name}       = application:get_env(kafkerl, gen_server_name),
+  Name = case application:get_env(kafkerl, gen_server_name) of
+           {ok, Value} -> Value;
+           _           -> kafkerl
+         end,
   {ok, ConnConfig} = application:get_env(kafkerl, conn_config),
   {ok, Topics}     = application:get_env(kafkerl, topics),
 

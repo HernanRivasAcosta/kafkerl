@@ -4,7 +4,8 @@
 -behaviour(gen_server).
 
 %% API
--export([send/2, send/3, request_metadata/1, get_partitions/1]).
+-export([send/2, send/3, request_metadata/1, get_partitions/1, subscribe/2,
+         unsubscribe/2]).
 % Only for internal use
 -export([request_metadata/6]).
 % Supervisors
@@ -14,6 +15,7 @@
          handle_call/3, handle_cast/2, handle_info/2]).
 
 -include("kafkerl.hrl").
+-include("kafkerl_consumers.hrl").
 
 -type start_link_response() :: {ok, pid()} | ignore | error().
 
@@ -28,7 +30,8 @@
                 max_metadata_retries    = -1 :: integer(),
                 retry_interval           = 1 :: non_neg_integer(),
                 config                  = [] :: {atom(), any()},
-                retry_on_topic_error = false :: boolean()}).
+                retry_on_topic_error = false :: boolean(),
+                callbacks               = [] :: [callback()]}).
 -type state() :: #state{}.
 
 %%==============================================================================
@@ -49,11 +52,17 @@ send(ServerRef, Message, Timeout) ->
 get_partitions(ServerRef) ->
   case gen_server:call(ServerRef, {get_partitions}) of
     {ok, Mapping} ->
-      % Perform this here to avoid locking the gen_server on this
-      reverse_topic_mapping(Mapping);
+      get_partitions_from_mapping(Mapping);
     Error ->
       Error
   end.
+
+-spec subscribe(server_ref(), callback()) -> ok.
+subscribe(ServerRef, Callback) ->
+  gen_server:call(ServerRef, {subscribe, Callback}).
+-spec unsubscribe(server_ref(), callback()) -> ok.
+unsubscribe(ServerRef, Callback) ->
+  gen_server:call(ServerRef, {unsubscribe, Callback}).
 
 -spec request_metadata(server_ref()) -> ok.
 request_metadata(ServerRef) ->
@@ -69,14 +78,26 @@ handle_call({send, Message}, _From, State) ->
 handle_call({request_metadata}, _From, State) ->
   {reply, ok, handle_request_metadata(State)};
 handle_call({get_partitions}, _From, State) ->
-  {reply, handle_get_partitions(State), State}.
+  {reply, handle_get_partitions(State), State};
+handle_call({subscribe, Callback}, _From, State) ->
+  {reply, ok, State#state{callbacks = [Callback | State#state.callbacks]}};
+handle_call({unsubscribe, Callback}, _From, State) ->
+  {reply, ok, State#state{callbacks = State#state.callbacks -- [Callback]}}.
 
 handle_info(metadata_timeout, State) ->
   {stop, {error, unable_to_retrieve_metadata}, State};
-handle_info({metadata_updated, TopicMapping}, State) ->
-  BrokerMapping = get_broker_mapping(TopicMapping, State),
+handle_info({metadata_updated, Mapping}, State) ->
+  BrokerMapping = get_broker_mapping(Mapping, State),
   lager:debug("Refreshed topic mapping: ~p", [BrokerMapping]),
-  {noreply, State#state{broker_mapping = BrokerMapping}};
+  PartitionData = get_partitions_from_mapping(BrokerMapping),
+  NewCallbacks = lists:filter(fun(Callback) ->
+                                kafkerl_utils:send_event(partition_update,
+                                                         Callback,
+                                                         PartitionData) =:= ok
+                              end, State#state.callbacks),
+  NewState = State#state{broker_mapping = BrokerMapping,
+                         callbacks = NewCallbacks},
+  {noreply, NewState};
 handle_info(Msg, State) ->
   lager:notice("Unexpected info message received: ~p on ~p", [Msg, State]),
   {noreply, State}.
@@ -272,12 +293,15 @@ get_broker_mapping([{{Topic, Partition, ConnId}, Address} | T],
   get_broker_mapping(T, State, NewN, [NewMapping | Acc]).
 
 start_broker_connection(N, Address, Config) ->
-  NewConn = kafkerl_broker_connection:start_link(N, self(), Address, Config),
-  {ok, Name, _Pid} = NewConn,
-  Name.
+  case kafkerl_broker_connection:start_link(N, self(), Address, Config) of
+    {ok, Name, _Pid} ->
+      Name;
+    {error, {already_started, Pid}} ->
+      Pid
+  end.
 
 % This is used to return the available partitions for each topic
-reverse_topic_mapping(Mapping) ->
+get_partitions_from_mapping(Mapping) ->
   F = fun({{Topic, Partition}, _}, Acc) ->
         case lists:keytake(Topic, 1, Acc) of
           false ->
