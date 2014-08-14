@@ -4,8 +4,8 @@
 -behaviour(gen_server).
 
 %% API
--export([send/2, send/3, request_metadata/1, get_partitions/1, subscribe/2,
-         unsubscribe/2]).
+-export([send/2, send/3, request_metadata/1, request_metadata/2, subscribe/2,
+         get_partitions/1, unsubscribe/2]).
 % Only for internal use
 -export([request_metadata/6]).
 % Supervisors
@@ -26,12 +26,12 @@
 -record(state, {brokers                 = [] :: [socket_address()],
                 broker_mapping        = void :: [broker_mapping()] | void,
                 client_id             = <<>> :: client_id(),
-                topics                  = [] :: [topic()],
                 max_metadata_retries    = -1 :: integer(),
                 retry_interval           = 1 :: non_neg_integer(),
                 config                  = [] :: {atom(), any()},
                 retry_on_topic_error = false :: boolean(),
-                callbacks               = [] :: [callback()]}).
+                callbacks               = [] :: [callback()],
+                known_topics            = [] :: [binary()]}).
 -type state() :: #state{}.
 
 %%==============================================================================
@@ -68,6 +68,10 @@ unsubscribe(ServerRef, Callback) ->
 request_metadata(ServerRef) ->
   gen_server:call(ServerRef, {request_metadata}).
 
+-spec request_metadata(server_ref(), [topic()]) -> ok.
+request_metadata(ServerRef, Topics) ->
+  gen_server:call(ServerRef, {request_metadata, Topics}).
+
 %%==============================================================================
 %% gen_server callbacks
 %%==============================================================================
@@ -76,7 +80,9 @@ request_metadata(ServerRef) ->
 handle_call({send, Message}, _From, State) ->
   {reply, handle_send(Message, State), State};
 handle_call({request_metadata}, _From, State) ->
-  {reply, ok, handle_request_metadata(State)};
+  {reply, ok, handle_request_metadata(State, [])};
+handle_call({request_metadata, Topics}, _From, State) ->
+  {reply, ok, handle_request_metadata(State, Topics)};
 handle_call({get_partitions}, _From, State) ->
   {reply, handle_get_partitions(State), State};
 handle_call({subscribe, Callback}, _From, State) ->
@@ -87,17 +93,24 @@ handle_call({unsubscribe, Callback}, _From, State) ->
 handle_info(metadata_timeout, State) ->
   {stop, {error, unable_to_retrieve_metadata}, State};
 handle_info({metadata_updated, Mapping}, State) ->
-  BrokerMapping = get_broker_mapping(Mapping, State),
-  lager:debug("Refreshed topic mapping: ~p", [BrokerMapping]),
-  PartitionData = get_partitions_from_mapping(BrokerMapping),
+  % Create the topic mapping (this also starts the broker connections)
+  NewBrokerMapping = get_broker_mapping(Mapping, State),
+  lager:debug("Refreshed topic mapping: ~p", [NewBrokerMapping]),
+  % Get the partition data to send to the subscribers and send it
+  PartitionData = get_partitions_from_mapping(NewBrokerMapping),
   NewCallbacks = lists:filter(fun(Callback) ->
                                 kafkerl_utils:send_event(partition_update,
                                                          Callback,
                                                          PartitionData) =:= ok
                               end, State#state.callbacks),
-  NewState = State#state{broker_mapping = BrokerMapping,
-                         callbacks = NewCallbacks},
-  {noreply, NewState};
+  % Add to the list of known topics
+  NewTopics = lists:sort([T || {T, _P} <- PartitionData]),
+  NewKnownTopics = lists:umerge(NewTopics, State#state.known_topics),
+  lager:debug("Known topics: ~p", [NewKnownTopics]),
+  {noreply,
+   State#state{broker_mapping = NewBrokerMapping,
+               callbacks = NewCallbacks,
+               known_topics = NewKnownTopics}};
 handle_info(Msg, State) ->
   lager:notice("Unexpected info message received: ~p on ~p", [Msg, State]),
   {noreply, State}.
@@ -124,13 +137,13 @@ init([Config]) ->
     {ok, [Brokers, MaxMetadataRetries, ClientId, Topics, RetryInterval,
           RetryOnTopicError]} ->
       State = #state{config               = Config,
-                     topics               = Topics,
+                     known_topics         = Topics,
                      brokers              = Brokers,
                      client_id            = ClientId,
                      retry_interval       = RetryInterval,
                      retry_on_topic_error = RetryOnTopicError,
                      max_metadata_retries = MaxMetadataRetries},
-      Request = metadata_request(State),
+      Request = metadata_request(State, Topics),
       % Start requesting metadata
       Params = [self(), Brokers, get_metadata_tcp_options(), MaxMetadataRetries,
                 RetryInterval, Request],
@@ -160,16 +173,17 @@ handle_get_partitions(#state{broker_mapping = Mapping}) ->
   {ok, Mapping}.
 
 % Ignore it if the topic mapping is void, we are already requesting the metadata
-handle_request_metadata(State = #state{broker_mapping = void}) ->
+handle_request_metadata(State = #state{broker_mapping = void}, _Topics) ->
   State;
-handle_request_metadata(State = #state{brokers = Brokers,
-                                       retry_interval = RetryInterval,
-                                       max_metadata_retries = MaxRetries}) ->
-  Request = metadata_request(State),
-  Params = [self(), Brokers, get_metadata_tcp_options(), MaxRetries,
-            RetryInterval, Request],
+handle_request_metadata(State, NewTopics) ->
+  SortedNewTopics = lists:sort(NewTopics),
+  Request = metadata_request(State, SortedNewTopics),
+  Params = [self(), State#state.brokers, get_metadata_tcp_options(),
+            State#state.max_metadata_retries, State#state.retry_interval,
+            Request],
   _Pid = spawn_link(?MODULE, request_metadata, Params),
-  State#state{broker_mapping = void}.
+  NewKnownTopics = lists:umerge(State#state.known_topics, SortedNewTopics),
+  State#state{broker_mapping = void, known_topics = NewKnownTopics}.
 
 %%==============================================================================
 %% Utils
@@ -235,8 +249,12 @@ request_metadata([{Host, Port} = _Broker | T] = _Brokers, TCPOpts, Request) ->
 %%==============================================================================
 %% Request building
 %%==============================================================================
-metadata_request(#state{topics = Topics, client_id = ClientId}) ->
-  kafkerl_protocol:build_metadata_request(Topics, 0, ClientId).
+metadata_request(#state{client_id = ClientId}, [] = _NewTopics) ->
+  kafkerl_protocol:build_metadata_request([], 0, ClientId);
+metadata_request(#state{known_topics = KnownTopics, client_id = ClientId},
+                 NewTopics) ->
+  AllTopics = lists:umerge(KnownTopics, NewTopics),
+  kafkerl_protocol:build_metadata_request(AllTopics, 0, ClientId).
 
 %%==============================================================================
 %% Topic/broker mapping

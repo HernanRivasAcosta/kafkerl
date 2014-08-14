@@ -4,7 +4,9 @@
 -export([start/0, start/2]).
 -export([produce/1, produce/2,
          get_partitions/0, get_partitions/1,
-         subscribe/1, subscribe/2]).
+         subscribe/1, subscribe/2,
+         unsubscribe/1, unsubscribe/2,
+         request_metadata/0, request_metadata/1, request_metadata/2]).
 
 -include("kafkerl.hrl").
 -include("kafkerl_consumers.hrl").
@@ -49,3 +51,15 @@ unsubscribe(Callback) ->
 -spec unsubscribe(atom(), callback()) -> ok.
 unsubscribe(Name, Callback) ->
   kafkerl_connector:unsubscribe(Name, Callback).
+
+-spec request_metadata() -> ok.
+request_metadata() ->
+  request_metadata(?MODULE).
+-spec request_metadata(atom() | [topic()]) -> ok.
+request_metadata(Name) when is_atom(Name) ->
+  kafkerl_connector:request_metadata(Name);
+request_metadata(Topics) ->
+  request_metadata(?MODULE, Topics).
+-spec request_metadata(atom(), [topic()]) -> ok.
+request_metadata(Name, Topics) ->
+  kafkerl_connector:request_metadata(Name, Topics).
