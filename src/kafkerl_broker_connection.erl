@@ -4,7 +4,7 @@
 -behaviour(gen_server).
 
 %% API
--export([send/2, flush/1]).
+-export([send/2, flush/1, kill/1]).
 % Only for internal use
 -export([connect/5]).
 % Supervisors
@@ -19,7 +19,8 @@
 -type conn_idx()            :: 0..1023.
 -type start_link_response() :: {ok, atom(), pid()} | ignore | {error, any()}.
 
--record(state, {conn_idx  = undefined :: conn_idx(),
+-record(state, {name      = undefined :: atom(),
+                conn_idx  = undefined :: conn_idx(),
                 client_id = undefined :: binary(),
                 socket    = undefined :: undefined | port(),
                 address   = undefined :: undefined | socket_address(),
@@ -38,8 +39,8 @@
 -spec start_link(conn_idx(), pid(), socket_address(), any()) ->
   start_link_response().
 start_link(Id, Connector, Address, Config) ->
-  Params = [Id, Connector, Address, Config],
   Name = list_to_atom(atom_to_list(?MODULE) ++ "_" ++ integer_to_list(Id)),
+  Params = [Id, Connector, Address, Config, Name],
   case gen_server:start_link({local, Name}, ?MODULE, Params, []) of
     {ok, Pid} ->
       {ok, Name, Pid};
@@ -55,6 +56,10 @@ send(ServerRef, Message) ->
 flush(ServerRef) ->
   gen_server:call(ServerRef, {flush}).
 
+-spec kill(server_ref()) -> ok.
+kill(ServerRef) ->
+  gen_server:call(ServerRef, {kill}).
+
 %%==============================================================================
 %% gen_server callbacks
 %%==============================================================================
@@ -62,7 +67,11 @@ flush(ServerRef) ->
 handle_call({send, Message}, _From, State) ->
   handle_send(Message, State);
 handle_call({flush}, _From, State) ->
-  handle_flush(State).
+  handle_flush(State);
+handle_call({kill}, _From, State = #state{name = Name}) ->
+  % TODO: handle the potentially buffered messages
+  lager:info("~p stopped by it's parent connector", [Name]),
+  {stop, normal, ok, State}.
 
 -spec handle_info(any(), state()) -> {noreply, state()}.
 handle_info({connected, Socket}, State) ->
@@ -92,7 +101,7 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%==============================================================================
 %% Handlers
 %%==============================================================================
-init([Id, Connector, Address, Config]) ->
+init([Id, Connector, Address, Config, Name]) ->
   Schema = [{tcp_options, [any], {default, []}},
             {retry_interval, positive_integer, {default, 1000}},
             {max_retries, positive_integer, {default, 3}},
@@ -100,9 +109,9 @@ init([Id, Connector, Address, Config]) ->
   case normalizerl:normalize_proplist(Schema, Config) of
     {ok, [TCPOpts, RetryInterval, MaxRetries, ClientId]} ->
       NewTCPOpts = kafkerl_utils:get_tcp_options(TCPOpts),
-      State = #state{conn_idx = Id, address = Address, connector = Connector,
+      State = #state{conn_idx = Id, tcp_options = NewTCPOpts, address = Address,
                      max_retries = MaxRetries, retry_interval = RetryInterval,
-                     tcp_options = NewTCPOpts, client_id = ClientId},
+                     connector = Connector, client_id = ClientId, name = Name},
       Params = [self(), NewTCPOpts, Address, RetryInterval, MaxRetries],
       _Pid = spawn_link(?MODULE, connect, Params),
       {ok, State};

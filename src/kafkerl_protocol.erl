@@ -289,6 +289,9 @@ build_fetch_partition({Partition, Offset, MaxBytes}) ->
      Offset:64/unsigned-integer,
      MaxBytes:32/unsigned-integer>>}.
 
+build_metadata_request([]) ->
+  % Builds an empty metadata request that returns all topics and partitions
+  {4, <<0:32/unsigned-integer>>};
 build_metadata_request(Topic) when is_binary(Topic) ->
   build_metadata_request([Topic]);
 build_metadata_request(Topics) ->
