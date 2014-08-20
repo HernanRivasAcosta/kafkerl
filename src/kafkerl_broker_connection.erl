@@ -173,10 +173,10 @@ handle_tcp_data(Bin, State = #state{connector = Connector}) ->
         {ok, Messages} ->
           Errors = get_errors_from_produce_response(Topics),
           case handle_errors(Errors, Messages) of
-            {ignore, _} ->
+            ignore ->
               State;
             {request_metadata, MessagesToResend} ->
-              Connector ! force_metadata_request,
+              kafkerl_connector:request_metadata(Connector),
               F = fun(M) -> kafkerl_connector:send(Connector, M) end,
               ok = lists:foreach(F, MessagesToResend),
               State
@@ -206,38 +206,51 @@ build_correlation_id(State = #state{request_number = RequestNumber,
 get_errors_from_produce_response(Topics) ->
   get_errors_from_produce_response(Topics, []).
 
+get_errors_from_produce_response([], Acc) ->
+  lists:reverse(Acc);
 get_errors_from_produce_response([{Topic, Partitions} | T], Acc) ->
   Errors = [{Topic, Partition, Error} ||
             {Partition, Error, _} <- Partitions, Error =/= ?NO_ERROR],
   get_errors_from_produce_response(T, Acc ++ Errors).
 
-handle_errors([] = Errors, _Messages) ->
-  {ignore, Errors};
+handle_errors([], _Messages) ->
+  ignore;
 handle_errors(Errors, Messages) ->
-  F = fun(E, Acc) -> handle_error(E, Messages, Acc) end,
-  lists:foreach(F, {ignore, []}, Errors).
+  F = fun(E) -> handle_error(E, Messages) end,
+  case lists:filtermap(F, Errors) of
+    [] -> ignore;
+    L  -> {request_metadata, L}
+  end.
 
-handle_error({Topic, Partition, Error}, Messages, {_Status, Acc} = Status)
+handle_error({Topic, Partition, Error}, Messages)
   when Error =:= ?UNKNOWN_TOPIC_OR_PARTITION orelse
        Error =:= ?LEADER_NOT_AVAILABLE orelse
        Error =:= ?NOT_LEADER_FOR_PARTITION ->
   case get_message_for_error(Topic, Partition, Messages) of
-    undefined -> Status;
-    Message   -> {request_metadata, [Message | Acc]}
+    undefined -> false;
+    Message   -> {true, Message}
   end;
-handle_error({Topic, Partition, Error}, _Messages, Acc) ->
+handle_error({Topic, Partition, Error}, _Messages) ->
   lager:error("Unable to handle ~p error on topic ~p, partition ~p",
               [kafkerl_error:get_error_name(Error), Topic, Partition]),
-  Acc.
+  false.
 
-get_message_for_error(Topic, Partition, []) ->
-  lager:error("no saved message found for error on topic ~p, partition ~p",
-              [Topic, Partition]),
-  undefined;
-get_message_for_error(Topic, Partition, [{Topic, Partition, _} = H | _T]) ->
-  H;
-get_message_for_error(Topic, Partition, [_Message | T]) ->
-  get_message_for_error(Topic, Partition, T).
+get_message_for_error(Topic, Partition, SavedMessages) ->
+  case lists:keyfind(Topic, 1, SavedMessages) of
+    false ->
+      lager:error("No saved messages found for topic ~p, partition ~p",
+                  [Topic, Partition]),
+      undefined;
+    {Topic, Partitions} ->
+      case lists:keyfind(Partition, 1, Partitions) of
+        false -> 
+          lager:error("No saved messages found for topic ~p, partition ~p",
+                      [Topic, Partition]),
+          undefined;
+        {Partition, Messages} ->
+          {Topic, Partition, Messages}
+      end
+  end.
 
 connect(Pid, _TCPOpts, {Host, Port} = _Address, _Timeout, 0) ->
   lager:error("Unable to connect to ~p:~p", [Host, Port]),

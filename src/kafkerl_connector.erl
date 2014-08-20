@@ -31,7 +31,8 @@
                 config                  = [] :: {atom(), any()},
                 retry_on_topic_error = false :: boolean(),
                 callbacks               = [] :: [callback()],
-                known_topics            = [] :: [binary()]}).
+                known_topics            = [] :: [binary()],
+                pending                 = [] :: [basic_message()]}).
 -type state() :: #state{}.
 
 %%==============================================================================
@@ -42,7 +43,7 @@ start_link(Name, Config) ->
   gen_server:start_link({local, Name}, ?MODULE, [Config], []).
 
 -spec send(server_ref(), basic_message()) -> ok | error().
-send(ServerRef, Message) when is_atom(ServerRef) ->
+send(ServerRef, Message) ->
   send(ServerRef, Message, 1000).
 -spec send(server_ref(), basic_message(), integer() | infinity) -> ok | error().
 send(ServerRef, Message, Timeout) ->
@@ -78,7 +79,7 @@ request_metadata(ServerRef, Topics) ->
 -spec handle_call(any(), any(), state()) -> {reply, ok, state()} |
                                             {reply, {error, any()}, state()}.
 handle_call({send, Message}, _From, State) ->
-  {reply, handle_send(Message, State), State};
+  handle_send(Message, State);
 handle_call({request_metadata}, _From, State) ->
   {reply, ok, handle_request_metadata(State, [])};
 handle_call({request_metadata, Topics}, _From, State) ->
@@ -92,7 +93,10 @@ handle_call({unsubscribe, Callback}, _From, State) ->
 
 handle_info(metadata_timeout, State) ->
   {stop, {error, unable_to_retrieve_metadata}, State};
-handle_info({metadata_updated, Mapping}, State) ->
+handle_info({metadata_updated, []}, State) ->
+  % If the metadata arrived empty request it again
+  {noreply, handle_request_metadata(State, [])};
+handle_info({metadata_updated, Mapping}, State = #state{pending = Pending}) ->
   % Create the topic mapping (this also starts the broker connections)
   NewBrokerMapping = get_broker_mapping(Mapping, State),
   lager:debug("Refreshed topic mapping: ~p", [NewBrokerMapping]),
@@ -107,10 +111,13 @@ handle_info({metadata_updated, Mapping}, State) ->
   NewTopics = lists:sort([T || {T, _P} <- PartitionData]),
   NewKnownTopics = lists:umerge(NewTopics, State#state.known_topics),
   lager:debug("Known topics: ~p", [NewKnownTopics]),
-  {noreply,
-   State#state{broker_mapping = NewBrokerMapping,
-               callbacks = NewCallbacks,
-               known_topics = NewKnownTopics}};
+  NewState = State#state{broker_mapping = NewBrokerMapping,
+                         callbacks = NewCallbacks,
+                         known_topics = NewKnownTopics,
+                         pending = []},
+  F = fun(P) -> handle_send(P, NewState) end,
+  ok = lists:foreach(F, Pending),
+  {noreply, NewState};
 handle_info(Msg, State) ->
   lager:notice("Unexpected info message received: ~p on ~p", [Msg, State]),
   {noreply, State}.
@@ -156,16 +163,32 @@ init([Config]) ->
       {stop, bad_config}
   end.
 
-handle_send(Message, #state{broker_mapping = Mapping}) ->
+handle_send(Message, State = #state{broker_mapping = void,
+                                    pending = Pending}) ->
+  % If we are waiting for the metadata, just save the message and move on
+  % TODO: Using the buffer instead of a list in the gen_server will be safer
+  {reply, ok, State#state{pending = [Message | Pending]}};
+handle_send(Message, State = #state{broker_mapping = Mapping,
+                                    known_topics = KnownTopics,
+                                    retry_on_topic_error = RetryTopics}) ->
   {Topic, Partition, Payload} = Message,
-  case lists:keyfind({Topic, Partition}, 1, Mapping) of
-    false ->
-      lager:error("Dropping ~p sent to topic ~p, partition ~p, reason: ~p",
-                  [Payload, Topic, Partition, no_broker]),
-      {error, invalid_topic_or_partition};
-    {_, Broker} ->
-      kafkerl_broker_connection:send(Broker, Message)
-  end.
+  ok = case {lists:keyfind({Topic, Partition}, 1, Mapping), RetryTopics} of
+         {false, false} ->
+           % When retry topics is false, just fail
+           lager:error("Dropping ~p sent to topic ~p, partition ~p, reason: ~p",
+                       [Payload, Topic, Partition, no_broker]),
+           {error, invalid_topic_or_partition};
+         {false, true} ->
+           % Send the message to any broker, this will eventually trigger a new
+           % metadata request, there might be better ways of handling this, but
+           % you should not be constantly sending messages to new topics anyway
+           [{_, Broker} | _] = Mapping,
+           kafkerl_broker_connection:send(Broker, Message);
+         {{_, Broker}, _} ->
+           kafkerl_broker_connection:send(Broker, Message)
+       end,
+  NewKnownTopics = lists:umerge([Topic], KnownTopics),
+  {reply, ok, State#state{known_topics = NewKnownTopics}}.
 
 handle_get_partitions(#state{broker_mapping = void}) ->
   {error, not_available};
@@ -177,12 +200,12 @@ handle_request_metadata(State = #state{broker_mapping = void}, _Topics) ->
   State;
 handle_request_metadata(State, NewTopics) ->
   SortedNewTopics = lists:sort(NewTopics),
-  Request = metadata_request(State, SortedNewTopics),
+  NewKnownTopics = lists:umerge(State#state.known_topics, SortedNewTopics),
+  Request = metadata_request(State, NewKnownTopics),
   Params = [self(), State#state.brokers, get_metadata_tcp_options(),
             State#state.max_metadata_retries, State#state.retry_interval,
             Request],
   _Pid = spawn_link(?MODULE, request_metadata, Params),
-  NewKnownTopics = lists:umerge(State#state.known_topics, SortedNewTopics),
   State#state{broker_mapping = void, known_topics = NewKnownTopics}.
 
 %%==============================================================================
