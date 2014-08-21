@@ -132,8 +132,8 @@ handle_get_saved_request(CorrelationId, State) ->
   {reply, Response, State}.
 
 handle_delete_saved_request(CorrelationId,
-                            State = #state{message_buffer = MessageBuffer}) ->
-  case lists:keytake(CorrelationId, 1, MessageBuffer) of
+                            State = #state{saved_requests = Requests}) ->
+  case lists:keytake(CorrelationId, 1, Requests) of
     false ->
       {reply, {error, not_found}, State};
     {value, {CorrelationId, _Bin, Messages}, NewMessageBuffer} ->

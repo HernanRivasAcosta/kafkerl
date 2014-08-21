@@ -4,7 +4,7 @@
 -behaviour(gen_server).
 
 %% API
--export([send/2, flush/1]).
+-export([send/2, flush/1, kill/1]).
 % Only for internal use
 -export([connect/5]).
 % Supervisors
@@ -19,7 +19,8 @@
 -type conn_idx()            :: 0..1023.
 -type start_link_response() :: {ok, atom(), pid()} | ignore | {error, any()}.
 
--record(state, {conn_idx  = undefined :: conn_idx(),
+-record(state, {name      = undefined :: atom(),
+                conn_idx  = undefined :: conn_idx(),
                 client_id = undefined :: binary(),
                 socket    = undefined :: undefined | port(),
                 address   = undefined :: undefined | socket_address(),
@@ -38,8 +39,8 @@
 -spec start_link(conn_idx(), pid(), socket_address(), any()) ->
   start_link_response().
 start_link(Id, Connector, Address, Config) ->
-  Params = [Id, Connector, Address, Config],
   Name = list_to_atom(atom_to_list(?MODULE) ++ "_" ++ integer_to_list(Id)),
+  Params = [Id, Connector, Address, Config, Name],
   case gen_server:start_link({local, Name}, ?MODULE, Params, []) of
     {ok, Pid} ->
       {ok, Name, Pid};
@@ -55,6 +56,10 @@ send(ServerRef, Message) ->
 flush(ServerRef) ->
   gen_server:call(ServerRef, {flush}).
 
+-spec kill(server_ref()) -> ok.
+kill(ServerRef) ->
+  gen_server:call(ServerRef, {kill}).
+
 %%==============================================================================
 %% gen_server callbacks
 %%==============================================================================
@@ -62,7 +67,11 @@ flush(ServerRef) ->
 handle_call({send, Message}, _From, State) ->
   handle_send(Message, State);
 handle_call({flush}, _From, State) ->
-  handle_flush(State).
+  handle_flush(State);
+handle_call({kill}, _From, State = #state{name = Name}) ->
+  % TODO: handle the potentially buffered messages
+  lager:info("~p stopped by it's parent connector", [Name]),
+  {stop, normal, ok, State}.
 
 -spec handle_info(any(), state()) -> {noreply, state()}.
 handle_info({connected, Socket}, State) ->
@@ -92,7 +101,7 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%==============================================================================
 %% Handlers
 %%==============================================================================
-init([Id, Connector, Address, Config]) ->
+init([Id, Connector, Address, Config, Name]) ->
   Schema = [{tcp_options, [any], {default, []}},
             {retry_interval, positive_integer, {default, 1000}},
             {max_retries, positive_integer, {default, 3}},
@@ -100,9 +109,9 @@ init([Id, Connector, Address, Config]) ->
   case normalizerl:normalize_proplist(Schema, Config) of
     {ok, [TCPOpts, RetryInterval, MaxRetries, ClientId]} ->
       NewTCPOpts = kafkerl_utils:get_tcp_options(TCPOpts),
-      State = #state{conn_idx = Id, address = Address, connector = Connector,
+      State = #state{conn_idx = Id, tcp_options = NewTCPOpts, address = Address,
                      max_retries = MaxRetries, retry_interval = RetryInterval,
-                     tcp_options = NewTCPOpts, client_id = ClientId},
+                     connector = Connector, client_id = ClientId, name = Name},
       Params = [self(), NewTCPOpts, Address, RetryInterval, MaxRetries],
       _Pid = spawn_link(?MODULE, connect, Params),
       {ok, State};
@@ -164,10 +173,10 @@ handle_tcp_data(Bin, State = #state{connector = Connector}) ->
         {ok, Messages} ->
           Errors = get_errors_from_produce_response(Topics),
           case handle_errors(Errors, Messages) of
-            {ignore, _} ->
+            ignore ->
               State;
             {request_metadata, MessagesToResend} ->
-              Connector ! force_metadata_request,
+              kafkerl_connector:request_metadata(Connector),
               F = fun(M) -> kafkerl_connector:send(Connector, M) end,
               ok = lists:foreach(F, MessagesToResend),
               State
@@ -197,38 +206,51 @@ build_correlation_id(State = #state{request_number = RequestNumber,
 get_errors_from_produce_response(Topics) ->
   get_errors_from_produce_response(Topics, []).
 
+get_errors_from_produce_response([], Acc) ->
+  lists:reverse(Acc);
 get_errors_from_produce_response([{Topic, Partitions} | T], Acc) ->
   Errors = [{Topic, Partition, Error} ||
             {Partition, Error, _} <- Partitions, Error =/= ?NO_ERROR],
   get_errors_from_produce_response(T, Acc ++ Errors).
 
-handle_errors([] = Errors, _Messages) ->
-  {ignore, Errors};
+handle_errors([], _Messages) ->
+  ignore;
 handle_errors(Errors, Messages) ->
-  F = fun(E, Acc) -> handle_error(E, Messages, Acc) end,
-  lists:foreach(F, {ignore, []}, Errors).
+  F = fun(E) -> handle_error(E, Messages) end,
+  case lists:filtermap(F, Errors) of
+    [] -> ignore;
+    L  -> {request_metadata, L}
+  end.
 
-handle_error({Topic, Partition, Error}, Messages, {_Status, Acc} = Status)
+handle_error({Topic, Partition, Error}, Messages)
   when Error =:= ?UNKNOWN_TOPIC_OR_PARTITION orelse
        Error =:= ?LEADER_NOT_AVAILABLE orelse
        Error =:= ?NOT_LEADER_FOR_PARTITION ->
   case get_message_for_error(Topic, Partition, Messages) of
-    undefined -> Status;
-    Message   -> {request_metadata, [Message | Acc]}
+    undefined -> false;
+    Message   -> {true, Message}
   end;
-handle_error({Topic, Partition, Error}, _Messages, Acc) ->
+handle_error({Topic, Partition, Error}, _Messages) ->
   lager:error("Unable to handle ~p error on topic ~p, partition ~p",
               [kafkerl_error:get_error_name(Error), Topic, Partition]),
-  Acc.
+  false.
 
-get_message_for_error(Topic, Partition, []) ->
-  lager:error("no saved message found for error on topic ~p, partition ~p",
-              [Topic, Partition]),
-  undefined;
-get_message_for_error(Topic, Partition, [{Topic, Partition, _} = H | _T]) ->
-  H;
-get_message_for_error(Topic, Partition, [_Message | T]) ->
-  get_message_for_error(Topic, Partition, T).
+get_message_for_error(Topic, Partition, SavedMessages) ->
+  case lists:keyfind(Topic, 1, SavedMessages) of
+    false ->
+      lager:error("No saved messages found for topic ~p, partition ~p",
+                  [Topic, Partition]),
+      undefined;
+    {Topic, Partitions} ->
+      case lists:keyfind(Partition, 1, Partitions) of
+        false -> 
+          lager:error("No saved messages found for topic ~p, partition ~p",
+                      [Topic, Partition]),
+          undefined;
+        {Partition, Messages} ->
+          {Topic, Partition, Messages}
+      end
+  end.
 
 connect(Pid, _TCPOpts, {Host, Port} = _Address, _Timeout, 0) ->
   lager:error("Unable to connect to ~p:~p", [Host, Port]),

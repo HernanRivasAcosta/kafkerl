@@ -106,8 +106,8 @@ build_produce_request({Topic, Partition, Messages}, Compression) ->
   TopicSize = byte_size(Topic),
   {Size, MessageSet} = build_message_set(Messages, Compression),
   {Size + TopicSize + 24,
-   [<<0:16/unsigned-integer,  % RequiredAcks
-      -1:32/unsigned-integer, % Timeout
+   [<<-1:16/signed-integer,
+      -1:32/signed-integer, % Timeout
       1:32/unsigned-integer,  % TopicCount
       TopicSize:16/unsigned-integer>>,
     Topic,
@@ -118,14 +118,12 @@ build_produce_request({Topic, Partition, Messages}, Compression) ->
 build_produce_request(Data, Compression) ->
   % Build the body of the request with multiple topics/partitions
   % (Docs at: http://goo.gl/J3C50c)
-  RequiredAcks = 0,
-  Timeout = -1,
   TopicCount = length(Data),
   {TopicsSize, Topics} = build_topics(Data, Compression),
   % 10 is the size of the header
   {TopicsSize + 10,
-   [<<RequiredAcks:16/unsigned-integer,
-      Timeout:32/unsigned-integer,
+   [<<-1:16/signed-integer, % RequiredAcks
+      -1:32/signed-integer, % Timeout
       TopicCount:32/unsigned-integer>>,
       Topics]}.
 
@@ -289,6 +287,9 @@ build_fetch_partition({Partition, Offset, MaxBytes}) ->
      Offset:64/unsigned-integer,
      MaxBytes:32/unsigned-integer>>}.
 
+build_metadata_request([]) ->
+  % Builds an empty metadata request that returns all topics and partitions
+  {4, <<0:32/unsigned-integer>>};
 build_metadata_request(Topic) when is_binary(Topic) ->
   build_metadata_request([Topic]);
 build_metadata_request(Topics) ->
@@ -337,8 +338,8 @@ parse_produced_partitions(Count, <<Partition:32/unsigned-integer,
                                    ErrorCode:16/signed-integer,
                                    Offset:64/unsigned-integer,
                                    Remainder/binary>>, Acc) ->
-  Partition = {Partition, ErrorCode, Offset},
-  parse_produced_partitions(Count - 1, Remainder, [Partition | Acc]).
+  PartitionData = {Partition, ErrorCode, Offset},
+  parse_produced_partitions(Count - 1, Remainder, [PartitionData | Acc]).
 
 
 % Parse fetch response (http://goo.gl/eba5z3)
