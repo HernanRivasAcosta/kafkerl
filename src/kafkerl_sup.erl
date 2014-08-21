@@ -34,8 +34,10 @@ get_connector_child_spec() ->
            _           -> kafkerl
          end,
   {ok, ConnConfig} = application:get_env(kafkerl, conn_config),
-  {ok, Topics}     = application:get_env(kafkerl, topics),
-
+  Topics = case application:get_env(kafkerl, topics) of
+             {ok, Any} -> Any;
+             undefined -> []
+           end,
   Params = [Name, [{topics, Topics} | ConnConfig]],
   MFA = {kafkerl_connector, start_link, Params},
   {Name, MFA, permanent, 2000, worker, [kafkerl_connector]}.
