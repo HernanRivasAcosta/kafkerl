@@ -8,6 +8,8 @@
          get_partitions/1, unsubscribe/2]).
 % Only for internal use
 -export([request_metadata/6]).
+% Only for broker connections
+-export([produce_succeeded/2]).
 % Supervisors
 -export([start_link/2]).
 % gen_server callbacks
@@ -73,6 +75,11 @@ request_metadata(ServerRef) ->
 request_metadata(ServerRef, Topics) ->
   gen_server:call(ServerRef, {request_metadata, Topics}).
 
+-spec produce_succeeded(server_ref(),
+                        [{topic(), partition(), binary(), integer()}]) -> ok.
+produce_succeeded(ServerRef, Messages) ->
+  gen_server:cast(ServerRef, {produce_succeeded, Messages}).
+
 %%==============================================================================
 %% gen_server callbacks
 %%==============================================================================
@@ -102,11 +109,8 @@ handle_info({metadata_updated, Mapping}, State = #state{pending = Pending}) ->
   lager:debug("Refreshed topic mapping: ~p", [NewBrokerMapping]),
   % Get the partition data to send to the subscribers and send it
   PartitionData = get_partitions_from_mapping(NewBrokerMapping),
-  NewCallbacks = lists:filter(fun(Callback) ->
-                                kafkerl_utils:send_event(partition_update,
-                                                         Callback,
-                                                         PartitionData) =:= ok
-                              end, State#state.callbacks),
+  Callbacks = State#state.callbacks,
+  NewCallbacks = send_event({partition_update, PartitionData}, Callbacks),
   % Add to the list of known topics
   NewTopics = lists:sort([T || {T, _P} <- PartitionData]),
   NewKnownTopics = lists:umerge(NewTopics, State#state.known_topics),
@@ -122,9 +126,13 @@ handle_info(Msg, State) ->
   lager:notice("Unexpected info message received: ~p on ~p", [Msg, State]),
   {noreply, State}.
 
-% Boilerplate
 -spec handle_cast(any(), state()) -> {noreply, state()}.
-handle_cast(_Msg, State) -> {noreply, State}.
+handle_cast({produce_succeeded, Messages}, State) ->
+  Callbacks = State#state.callbacks,
+  NewCallbacks = send_event({produced, Messages}, Callbacks),
+  {noreply, State#state{callbacks = NewCallbacks}}.
+
+% Boilerplate
 -spec terminate(atom(), state()) -> ok.
 terminate(_Reason, _State) -> ok.
 -spec code_change(string(), state(), any()) -> {ok, state()}.
@@ -277,6 +285,11 @@ request_metadata([{Host, Port} = _Broker | T] = _Brokers, TCPOpts, Request) ->
           end
       end
   end.
+
+send_event(Event, Callbacks) ->
+  lists:filter(fun(Callback) ->
+                 kafkerl_utils:send_event(Callback, Event) =:= ok
+               end, Callbacks).
 
 %%==============================================================================
 %% Request building
