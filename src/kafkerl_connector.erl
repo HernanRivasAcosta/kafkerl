@@ -172,21 +172,30 @@ handle_send(Message, State = #state{broker_mapping = Mapping,
                                     known_topics = KnownTopics,
                                     retry_on_topic_error = RetryTopics}) ->
   {Topic, Partition, Payload} = Message,
-  ok = case {lists:keyfind({Topic, Partition}, 1, Mapping), RetryTopics} of
-         {false, false} ->
-           % When retry topics is false, just fail
-           lager:error("Dropping ~p sent to topic ~p, partition ~p, reason: ~p",
-                       [Payload, Topic, Partition, no_broker]),
-           {error, invalid_topic_or_partition};
-         {false, true} ->
-           % Send the message to any broker, this will eventually trigger a new
-           % metadata request, there might be better ways of handling this, but
-           % you should not be constantly sending messages to new topics anyway
-           [{_, Broker} | _] = Mapping,
-           kafkerl_broker_connection:send(Broker, Message);
-         {{_, Broker}, _} ->
-           kafkerl_broker_connection:send(Broker, Message)
-       end,
+  _ = case {lists:keyfind({Topic, Partition}, 1, Mapping), RetryTopics} of
+        {false, false} ->
+          % When retry topics is false, just fail
+          lager:error("Dropping ~p sent to non existing topic ~p",
+                      [Payload, Topic]),
+          {error, invalid_topic};
+        {false, true} ->
+          % We need to check if the topic is valid, if it is and the partition
+          % is invalid, then retrying is not going to work. Otherwise, we just
+          % send the message to any broker as this will later on trigger a new
+          % metadata request. There might be better ways of handling this, but
+          % you should not be constantly sending messages to new topics anyway
+          case lists:any(fun({{T, _}, _}) -> T =:= Topic end, Mapping) of
+            true ->
+              lager:error("Dropping ~p sent to topic ~p, partition ~p",
+                          [Payload, Topic, Partition]),
+              {error, invalid_topic};
+            false ->
+              [{_, Broker} | _] = Mapping,
+              kafkerl_broker_connection:send(Broker, Message)
+          end;
+        {{_, Broker}, _} ->
+          kafkerl_broker_connection:send(Broker, Message)
+      end,
   NewKnownTopics = lists:umerge([Topic], KnownTopics),
   {reply, ok, State#state{known_topics = NewKnownTopics}}.
 
