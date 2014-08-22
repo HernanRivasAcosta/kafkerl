@@ -171,7 +171,11 @@ handle_tcp_data(Bin, State = #state{connector = Connector}) ->
                       [CorrelationId, Reason]),
           State;
         {ok, Messages} ->
-          Errors = get_errors_from_produce_response(Topics),
+          {Errors, Successes} = separate_errors(Topics),
+          % First, send the offsets and messages that were delivered
+          spawn(fun() ->
+                  notify_success_to_connector(Successes, Messages, Connector)
+                end),
           case handle_errors(Errors, Messages) of
             ignore ->
               State;
@@ -180,8 +184,7 @@ handle_tcp_data(Bin, State = #state{connector = Connector}) ->
               F = fun(M) -> kafkerl_connector:send(Connector, M) end,
               ok = lists:foreach(F, MessagesToResend),
               State
-          end,
-          State
+          end
       end;
     Other ->
      lager:critical("unexpected response when parsing message: ~p", [Other]),
@@ -191,11 +194,25 @@ handle_tcp_data(Bin, State = #state{connector = Connector}) ->
 %%==============================================================================
 %% Utils
 %%==============================================================================
+notify_success_to_connector([], _Messages, _Pid) ->
+  ok;
+notify_success_to_connector([{Topic, Partition, Offset} | T], Messages, Pid) ->
+  MergedMessages = kafkerl_utils:merge_messages(Messages),
+  Partitions = partitions_in_topic(Topic, MergedMessages),
+  M = messages_in_partition(Partition, Partitions),
+  kafkerl_connector:produce_succeeded(Pid, {Topic, Partition, M, Offset}),
+  notify_success_to_connector(T, Messages, Pid).
+  
+partitions_in_topic(Topic, Messages) ->
+  lists:flatten([P || {T, P} <- Messages, T =:= Topic]).
+messages_in_partition(Partition, Messages) ->
+  lists:flatten([M || {P, M} <- Messages, P =:= Partition]).
+
 build_correlation_id(State = #state{request_number = RequestNumber,
                                     conn_idx = ConnIdx}) ->
   % CorrelationIds are 32 bit integers, of those, the first 10 bits are used for
-  % the connectionId (hence the 1023 limit on it) and the other 22 are for the
-  % sequential, this magic number down here is simply 2^10-1
+  % the connectionId (hence the 1023 limit on it) and the other 22 bits are used
+  % for the sequential numbering, this magic number down here is actually 2^10-1
   NextRequest = case RequestNumber > 4194303 of
                   true -> 0;
                   false -> RequestNumber + 1
@@ -203,15 +220,19 @@ build_correlation_id(State = #state{request_number = RequestNumber,
   CorrelationId = (ConnIdx bsl 22) bor NextRequest,
   {ok, CorrelationId, State#state{request_number = NextRequest}}.
 
-get_errors_from_produce_response(Topics) ->
-  get_errors_from_produce_response(Topics, []).
+% TODO: Refactor this function, it is not sufficiently clear what it does
+separate_errors(Topics) ->
+  separate_errors(Topics, {[], []}).
 
-get_errors_from_produce_response([], Acc) ->
-  lists:reverse(Acc);
-get_errors_from_produce_response([{Topic, Partitions} | T], Acc) ->
-  Errors = [{Topic, Partition, Error} ||
-            {Partition, Error, _} <- Partitions, Error =/= ?NO_ERROR],
-  get_errors_from_produce_response(T, Acc ++ Errors).
+separate_errors([], Acc) ->
+  Acc;
+separate_errors([{Topic, Partitions} | T], Acc) ->
+  F = fun({Partition, ?NO_ERROR, Offset}, {E, S}) ->
+           {E, [{Topic, Partition, Offset} | S]};
+         ({Partition, Error, _}, {E, S}) ->
+           {[{Topic, Partition, Error} | E], S}
+      end,
+  separate_errors(T, lists:foldl(F, Acc, Partitions)).
 
 handle_errors([], _Messages) ->
   ignore;
