@@ -19,8 +19,6 @@
 -include("kafkerl.hrl").
 -include("kafkerl_consumers.hrl").
 
--type start_link_response() :: {ok, pid()} | ignore | error().
-
 -type server_ref()          :: atom() | pid().
 -type broker_mapping_key()  :: {topic(), partition()}.
 -type broker_mapping()      :: {broker_mapping_key(), server_ref()}.
@@ -40,7 +38,7 @@
 %%==============================================================================
 %% API
 %%==============================================================================
--spec start_link(atom(), any()) -> start_link_response().
+-spec start_link(atom(), any()) -> {ok, pid()} | ignore | error().
 start_link(Name, Config) ->
   gen_server:start_link({local, Name}, ?MODULE, [Config], []).
 
@@ -60,7 +58,7 @@ get_partitions(ServerRef) ->
       Error
   end.
 
--spec subscribe(server_ref(), callback()) -> ok.
+-spec subscribe(server_ref(), callback()) -> ok | error().
 subscribe(ServerRef, Callback) ->
   gen_server:call(ServerRef, {subscribe, Callback}).
 -spec unsubscribe(server_ref(), callback()) -> ok.
@@ -94,7 +92,12 @@ handle_call({request_metadata, Topics}, _From, State) ->
 handle_call({get_partitions}, _From, State) ->
   {reply, handle_get_partitions(State), State};
 handle_call({subscribe, Callback}, _From, State) ->
-  {reply, ok, State#state{callbacks = [Callback | State#state.callbacks]}};
+  case send_mapping_to(Callback, State) of
+    ok ->
+      {reply, ok, State#state{callbacks = [Callback | State#state.callbacks]}};
+    _  ->
+      {reply, {error, invalid_callback}, State}
+  end;
 handle_call({unsubscribe, Callback}, _From, State) ->
   {reply, ok, State#state{callbacks = State#state.callbacks -- [Callback]}}.
 
@@ -375,6 +378,12 @@ get_partitions_from_mapping(Mapping) ->
         end
       end,
   lists:foldl(F, [], Mapping).
+
+send_mapping_to(_NewCallback, #state{broker_mapping = void}) ->
+  ok;
+send_mapping_to(NewCallback, #state{broker_mapping = Mapping}) ->
+  Partitions = get_partitions_from_mapping(Mapping),
+  kafkerl_utils:send_event(NewCallback, {partition_update, Partitions}).
 
 %%==============================================================================
 %% Error handling
