@@ -4,4 +4,6 @@
                     {atom(), atom()} |
                     {atom(), atom(), [any()]}.
 
+-type filters()  :: all | [atom()].
+
 -type message_metadata() :: {done | incomplete, integer(), integer()}.

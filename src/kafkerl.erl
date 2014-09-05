@@ -4,7 +4,7 @@
 -export([start/0, start/2]).
 -export([produce/1, produce/2,
          get_partitions/0, get_partitions/1,
-         subscribe/1, subscribe/2,
+         subscribe/1, subscribe/2, subscribe/3,
          unsubscribe/1, unsubscribe/2,
          request_metadata/0, request_metadata/1, request_metadata/2]).
 
@@ -42,8 +42,16 @@ get_partitions(Name) ->
 subscribe(Callback) ->
   subscribe(?MODULE, Callback).
 -spec subscribe(atom(), callback()) -> ok.
+subscribe(Callback, all = Filter) ->
+  subscribe(?MODULE, Callback, Filter);
+subscribe(Callback, Filter) when is_list(Filter) ->
+  subscribe(?MODULE, Callback, Filter);
 subscribe(Name, Callback) ->
-  kafkerl_connector:subscribe(Name, Callback).
+  subscribe(Name, Callback, all).
+-spec subscribe(atom(), callback(), filters()) -> ok.
+subscribe(Name, Callback, Filter) ->
+  kafkerl_connector:subscribe(Name, Callback, Filter).
+
 
 -spec unsubscribe(callback()) -> ok.
 unsubscribe(Callback) ->
