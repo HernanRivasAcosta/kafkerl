@@ -5,7 +5,7 @@
 
 %% API
 -export([send/2, send/3, request_metadata/1, request_metadata/2, subscribe/2,
-         get_partitions/1, unsubscribe/2]).
+         subscribe/3, get_partitions/1, unsubscribe/2]).
 % Only for internal use
 -export([request_metadata/6]).
 % Only for broker connections
@@ -30,7 +30,7 @@
                 retry_interval           = 1 :: non_neg_integer(),
                 config                  = [] :: {atom(), any()},
                 retry_on_topic_error = false :: boolean(),
-                callbacks               = [] :: [callback()],
+                callbacks               = [] :: [{filters(), callback()}],
                 known_topics            = [] :: [binary()],
                 pending                 = [] :: [basic_message()]}).
 -type state() :: #state{}.
@@ -60,7 +60,10 @@ get_partitions(ServerRef) ->
 
 -spec subscribe(server_ref(), callback()) -> ok | error().
 subscribe(ServerRef, Callback) ->
-  gen_server:call(ServerRef, {subscribe, Callback}).
+  subscribe(ServerRef, Callback, all).
+-spec subscribe(server_ref(), callback(), filters()) -> ok | error().
+subscribe(ServerRef, Callback, Filter) ->
+  gen_server:call(ServerRef, {subscribe, {Filter, Callback}}).
 -spec unsubscribe(server_ref(), callback()) -> ok.
 unsubscribe(ServerRef, Callback) ->
   gen_server:call(ServerRef, {unsubscribe, Callback}).
@@ -289,9 +292,13 @@ request_metadata([{Host, Port} = _Broker | T] = _Brokers, TCPOpts, Request) ->
       end
   end.
 
+send_event(Event, {all, Callback}) ->
+  kafkerl_utils:send_event(Callback, Event);
+send_event({EventName, _Data} = Event, {EventName, Callback}) ->
+  kafkerl_utils:send_event(Callback, Event);
 send_event(Event, Callbacks) ->
   lists:filter(fun(Callback) ->
-                 kafkerl_utils:send_event(Callback, Event) =:= ok
+                 send_event(Event, Callback) =:= ok
                end, Callbacks).
 
 %%==============================================================================
@@ -383,7 +390,7 @@ send_mapping_to(_NewCallback, #state{broker_mapping = void}) ->
   ok;
 send_mapping_to(NewCallback, #state{broker_mapping = Mapping}) ->
   Partitions = get_partitions_from_mapping(Mapping),
-  kafkerl_utils:send_event(NewCallback, {partition_update, Partitions}).
+  send_event({partition_update, Partitions}, NewCallback).
 
 %%==============================================================================
 %% Error handling
