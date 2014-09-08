@@ -471,7 +471,7 @@ parse_topic_metadata(Count, <<>>, Acc) when Count =< 0 ->
 parse_topic_metadata(Count, Bin, Acc) when Count =< 0 ->
   lager:warning("Finished parsing topic metadata, ignoring bytes: ~p", [Bin]),
   {ok, lists:reverse(Acc)};
-parse_topic_metadata(Count, <<ErrorCode:16/unsigned-integer,
+parse_topic_metadata(Count, <<ErrorCode:16/signed-integer,
                               TopicSize:16/unsigned-integer,
                               TopicName:TopicSize/binary,
                               PartitionCount:32/unsigned-integer,
