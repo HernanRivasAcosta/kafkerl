@@ -77,7 +77,7 @@ request_metadata(ServerRef, Topics) ->
   gen_server:call(ServerRef, {request_metadata, Topics}).
 
 -spec produce_succeeded(server_ref(),
-                        [{topic(), partition(), binary(), integer()}]) -> ok.
+                        [{topic(), partition(), [binary()], integer()}]) -> ok.
 produce_succeeded(ServerRef, Messages) ->
   gen_server:cast(ServerRef, {produce_succeeded, Messages}).
 
@@ -296,6 +296,8 @@ send_event(Event, {all, Callback}) ->
   kafkerl_utils:send_event(Callback, Event);
 send_event({EventName, _Data} = Event, {EventName, Callback}) ->
   kafkerl_utils:send_event(Callback, Event);
+send_event({EventName, _Data} = Event, {_Other, Callback}) ->
+  ok;
 send_event(Event, Callbacks) ->
   lists:filter(fun(Callback) ->
                  send_event(Event, Callback) =:= ok
