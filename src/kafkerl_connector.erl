@@ -294,10 +294,11 @@ request_metadata([{Host, Port} = _Broker | T] = _Brokers, TCPOpts, Request) ->
 
 send_event(Event, {all, Callback}) ->
   kafkerl_utils:send_event(Callback, Event);
-send_event({EventName, _Data} = Event, {EventName, Callback}) ->
-  kafkerl_utils:send_event(Callback, Event);
-send_event({EventName, _Data} = Event, {_Other, Callback}) ->
-  ok;
+send_event({EventName, _Data} = Event, {Events, Callback}) ->
+  case is_list(Events) andalso lists:member(EventName, Events) of
+    true -> kafkerl_utils:send_event(Callback, Event);
+    false -> ok
+  end;
 send_event(Event, Callbacks) ->
   lists:filter(fun(Callback) ->
                  send_event(Event, Callback) =:= ok
