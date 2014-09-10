@@ -34,10 +34,10 @@ done
 
 # make sure the path is defined
 if [ ! -d "${d}" ]; then echo "invalid kafka path ${d}" ; exit 1 ; fi
-if [ ! -f "${z}" ]; then echo "invalid zookeeper path \"${z}\"" ; exit 1 ; fi
-if [ ! -f "${k}" ]; then echo "invalid kafka config path \"${k}\"" ; exit 1 ; fi
 
 "${d}/bin/zookeeper-server-start.sh" ${z} &
 "${d}/bin/kafka-server-start.sh" ${k} &
+sleep 4
+"${d}/bin/kafka-topics.sh" --create --zookeeper localhost:2181 --replication-factor 1 --partitions 1 --topic topic1
 
 exit 1

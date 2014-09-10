@@ -7,3 +7,5 @@ erl_crash.dump
 ebin
 log
 *.log
+*.bak
+rebar
