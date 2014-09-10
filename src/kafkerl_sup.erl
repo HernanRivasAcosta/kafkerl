@@ -25,8 +25,14 @@ start_link() ->
 %%==============================================================================
 -spec init([]) -> {ok, {restart_strategy(), [supervisor:child_spec()]}}.
 init([]) ->
-  {ok, {{one_for_one, 5, 10}, [get_connector_child_spec(),
-                               get_buffer_child_spec()]}}.
+  ChildSpecs = case application:get_env(kafkerl, disabled, false) of
+                 true ->
+                   lager:notice("Kafkerl is disabled, ignoring"),
+                   [];
+                 false ->
+                   [get_connector_child_spec(), get_buffer_child_spec()]
+               end,
+  {ok, {{one_for_one, 5, 10}, ChildSpecs}}.
 
 get_connector_child_spec() ->
   Name = case application:get_env(kafkerl, gen_server_name) of
