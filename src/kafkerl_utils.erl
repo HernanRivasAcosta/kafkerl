@@ -4,6 +4,7 @@
 -export([send_event/2, send_error/2]).
 -export([get_tcp_options/1]).
 -export([merge_messages/1]).
+-export([buffer_name/2]).
 
 -include("kafkerl.hrl").
 -include("kafkerl_consumers.hrl").
@@ -40,6 +41,11 @@ get_tcp_options(Options) -> % TODO: refactor
 -spec merge_messages([basic_message()]) -> merged_message().
 merge_messages(Topics) ->
   merge_topics(Topics).
+
+-spec buffer_name(topic(), partition()) -> atom().
+buffer_name(Topic, Partition) ->
+  Bin = <<Topic/binary, $., (integer_to_binary(Partition))/binary, "_buffer">>,
+  binary_to_atom(Bin, utf8).
 
 %%==============================================================================
 %% Utils
