@@ -117,7 +117,6 @@ handle_info(metadata_timeout, State) ->
   {stop, {error, unable_to_retrieve_metadata}, State};
 handle_info({metadata_updated, []}, State) ->
   % If the metadata arrived empty request it again
-  lager:notice("metadata arrived empty"),
   {noreply, handle_request_metadata(State#state{broker_mapping = []}, [])};
 handle_info({metadata_updated, Mapping}, State) ->
   % Create the topic mapping (this also starts the broker connections)
@@ -307,9 +306,7 @@ request_metadata([{Host, Port} = _Broker | T] = _Brokers, TCPOpts, Request) ->
                   request_metadata(T, TCPOpts, Request);
                 {ok, _CorrelationId, Metadata} ->
                   % We received a metadata response, make sure it has brokers
-                  TopicMapping = get_topic_mapping(Metadata),
-                  lager:notice("TopicMapping: ~p", [TopicMapping]),
-                  {ok, TopicMapping}
+                  {ok, get_topic_mapping(Metadata)}
               end
           end
       end
