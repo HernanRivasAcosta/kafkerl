@@ -52,7 +52,6 @@ subscribe(Name, Callback) ->
 subscribe(Name, Callback, Filter) ->
   kafkerl_connector:subscribe(Name, Callback, Filter).
 
-
 -spec unsubscribe(callback()) -> ok.
 unsubscribe(Callback) ->
   unsubscribe(?MODULE, Callback).

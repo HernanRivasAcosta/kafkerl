@@ -30,26 +30,14 @@ init([]) ->
                    lager:notice("Kafkerl is disabled, ignoring"),
                    [];
                  false ->
-                   [get_connector_child_spec(), get_buffer_child_spec()]
+                   [get_connector_child_spec()]
                end,
   {ok, {{one_for_one, 5, 10}, ChildSpecs}}.
 
 get_connector_child_spec() ->
-  Name = case application:get_env(kafkerl, gen_server_name) of
-           {ok, Value} -> Value;
-           _           -> kafkerl
-         end,
+  Name = application:get_env(kafkerl, gen_server_name, kafkerl),
   {ok, ConnConfig} = application:get_env(kafkerl, conn_config),
-  Topics = case application:get_env(kafkerl, topics) of
-             {ok, Any} -> Any;
-             undefined -> []
-           end,
+  Topics = application:get_env(kafkerl, topics, []),
   Params = [Name, [{topics, Topics} | ConnConfig]],
   MFA = {kafkerl_connector, start_link, Params},
   {Name, MFA, permanent, 2000, worker, [kafkerl_connector]}.
-
-get_buffer_child_spec() ->
-  {ok, BufferConfig} = application:get_env(kafkerl, buffer),
-
-  MFA = {kafkerl_buffer, start_link, [BufferConfig]},
-  {?ETS_BUFFER, MFA, permanent, 2000, worker, [kafkerl_buffer]}.
