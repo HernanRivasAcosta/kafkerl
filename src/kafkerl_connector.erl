@@ -32,7 +32,9 @@
                 retry_on_topic_error = false :: boolean(),
                 callbacks               = [] :: [{filters(), callback()}],
                 known_topics            = [] :: [binary()],
-                pending                 = [] :: [basic_message()]}).
+                pending                 = [] :: [basic_message()],
+                last_metadata_request    = 0 :: integer(),
+                metadata_request_cd      = 0 :: integer()}).
 -type state() :: #state{}.
 
 %%==============================================================================
@@ -115,7 +117,8 @@ handle_info(metadata_timeout, State) ->
   {stop, {error, unable_to_retrieve_metadata}, State};
 handle_info({metadata_updated, []}, State) ->
   % If the metadata arrived empty request it again
-  {noreply, handle_request_metadata(State, [])};
+  lager:notice("metadata arrived empty"),
+  {noreply, handle_request_metadata(State#state{broker_mapping = []}, [])};
 handle_info({metadata_updated, Mapping}, State) ->
   % Create the topic mapping (this also starts the broker connections)
   NewBrokerMapping = get_broker_mapping(Mapping, State),
@@ -158,18 +161,20 @@ init([Config]) ->
             {max_metadata_retries, {integer, {-1, undefined}}, {default, -1}},
             {client_id, binary, {default, <<"kafkerl_client">>}},
             {topics, [binary], required},
-            {metadata_tcp_timeout, {integer, {1, undefined}}, {default, 1500}},
-            {retry_on_topic_error, boolean, {default, false}}],
+            {metadata_tcp_timeout, positive_integer, {default, 1500}},
+            {retry_on_topic_error, boolean, {default, false}},
+            {metadata_request_cooldown, positive_integer, {default, 333}}],
   case normalizerl:normalize_proplist(Schema, Config) of
     {ok, [Brokers, MaxMetadataRetries, ClientId, Topics, RetryInterval,
-          RetryOnTopicError]} ->
+          RetryOnTopicError, MetadataRequestCooldown]} ->
       State = #state{config               = Config,
                      known_topics         = Topics,
                      brokers              = Brokers,
                      client_id            = ClientId,
                      retry_interval       = RetryInterval,
                      retry_on_topic_error = RetryOnTopicError,
-                     max_metadata_retries = MaxMetadataRetries},
+                     max_metadata_retries = MaxMetadataRetries,
+                     metadata_request_cd  = MetadataRequestCooldown},
       Request = metadata_request(State, Topics),
       % Start requesting metadata
       Params = [self(), Brokers, get_metadata_tcp_options(), MaxMetadataRetries,
@@ -201,7 +206,8 @@ handle_send(Message, State = #state{broker_mapping = Mapping, pending = Pending,
       % ets takes some time to start, so some messages could be lost.
       % Therefore if we have the topic/partition, just send it again (the order
       % will suffer though)
-      {reply, send(self(), Message), State};
+      send(self(), Message),
+      {reply, ok, State};
     false ->
       % Now, if the topic/partition was not valid, we need to check if the topic
       % exists, if it does, just drop the message as we can assume no partitions
@@ -233,8 +239,18 @@ handle_request_metadata(State, NewTopics) ->
   Params = [self(), State#state.brokers, get_metadata_tcp_options(),
             State#state.max_metadata_retries, State#state.retry_interval,
             Request],
-  _Pid = spawn_link(?MODULE, request_metadata, Params),
-  State#state{broker_mapping = void, known_topics = NewKnownTopics}.
+  {A, B, C} = erlang:now(),
+  Now = (A * 1000000 + B) * 1000 + C div 1000,
+  LastRequest = State#state.last_metadata_request,
+  Cooldown = State#state.metadata_request_cd,
+  _ = case Cooldown - (Now - LastRequest) of
+        Negative when Negative < 0 ->
+          _ = spawn_link(?MODULE, request_metadata, Params);
+        NonNegative ->
+          _ = timer:apply_after(NonNegative, ?MODULE, request_metadata, Params)
+      end,
+  State#state{broker_mapping = void, known_topics = NewKnownTopics,
+              last_metadata_request = Now}.
 
 %%==============================================================================
 %% Utils
@@ -291,7 +307,9 @@ request_metadata([{Host, Port} = _Broker | T] = _Brokers, TCPOpts, Request) ->
                   request_metadata(T, TCPOpts, Request);
                 {ok, _CorrelationId, Metadata} ->
                   % We received a metadata response, make sure it has brokers
-                  {ok, get_topic_mapping(Metadata)}
+                  TopicMapping = get_topic_mapping(Metadata),
+                  lager:notice("TopicMapping: ~p", [TopicMapping]),
+                  {ok, TopicMapping}
               end
           end
       end
