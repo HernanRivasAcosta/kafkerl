@@ -32,7 +32,9 @@
                 retry_on_topic_error = false :: boolean(),
                 callbacks               = [] :: [{filters(), callback()}],
                 known_topics            = [] :: [binary()],
-                pending                 = [] :: [basic_message()]}).
+                pending                 = [] :: [basic_message()],
+                last_metadata_request    = 0 :: integer(),
+                metadata_request_cd      = 0 :: integer()}).
 -type state() :: #state{}.
 
 %%==============================================================================
@@ -46,8 +48,15 @@ start_link(Name, Config) ->
 send(ServerRef, Message) ->
   send(ServerRef, Message, 1000).
 -spec send(server_ref(), basic_message(), integer() | infinity) -> ok | error().
-send(ServerRef, Message, Timeout) ->
-  gen_server:call(ServerRef, {send, Message}, Timeout).
+send(ServerRef, {Topic, Partition, Payload} = Message, Timeout) ->
+  Buffer = kafkerl_utils:buffer_name(Topic, Partition),
+  case ets_buffer:write(Buffer, Message) of
+    NewCount when is_integer(NewCount) ->
+      ok;
+    Error ->
+      lager:debug("unable to send message to ~p, reason: ~p", [Buffer, Error]),
+      gen_server:call(ServerRef, {send, Message}, Timeout)
+  end.
 
 -spec get_partitions(server_ref()) -> [{topic(), [partition()]}] | error().
 get_partitions(ServerRef) ->
@@ -108,8 +117,8 @@ handle_info(metadata_timeout, State) ->
   {stop, {error, unable_to_retrieve_metadata}, State};
 handle_info({metadata_updated, []}, State) ->
   % If the metadata arrived empty request it again
-  {noreply, handle_request_metadata(State, [])};
-handle_info({metadata_updated, Mapping}, State = #state{pending = Pending}) ->
+  {noreply, handle_request_metadata(State#state{broker_mapping = []}, [])};
+handle_info({metadata_updated, Mapping}, State) ->
   % Create the topic mapping (this also starts the broker connections)
   NewBrokerMapping = get_broker_mapping(Mapping, State),
   lager:debug("Refreshed topic mapping: ~p", [NewBrokerMapping]),
@@ -121,13 +130,12 @@ handle_info({metadata_updated, Mapping}, State = #state{pending = Pending}) ->
   NewTopics = lists:sort([T || {T, _P} <- PartitionData]),
   NewKnownTopics = lists:umerge(NewTopics, State#state.known_topics),
   lager:debug("Known topics: ~p", [NewKnownTopics]),
-  NewState = State#state{broker_mapping = NewBrokerMapping,
-                         callbacks = NewCallbacks,
-                         known_topics = NewKnownTopics,
-                         pending = []},
-  F = fun(P) -> handle_send(P, NewState) end,
-  ok = lists:foreach(F, Pending),
-  {noreply, NewState};
+  % Reverse the pending messages and try to send them again
+  RPending = lists:reverse(State#state.pending),
+  ok = lists:foreach(fun(P) -> send(self(), P) end, RPending),
+  {noreply, State#state{broker_mapping = NewBrokerMapping, pending = [],
+                        callbacks = NewCallbacks,
+                        known_topics = NewKnownTopics}};
 handle_info(Msg, State) ->
   lager:notice("Unexpected info message received: ~p on ~p", [Msg, State]),
   {noreply, State}.
@@ -152,18 +160,20 @@ init([Config]) ->
             {max_metadata_retries, {integer, {-1, undefined}}, {default, -1}},
             {client_id, binary, {default, <<"kafkerl_client">>}},
             {topics, [binary], required},
-            {metadata_tcp_timeout, {integer, {1, undefined}}, {default, 1500}},
-            {retry_on_topic_error, boolean, {default, false}}],
+            {metadata_tcp_timeout, positive_integer, {default, 1500}},
+            {retry_on_topic_error, boolean, {default, false}},
+            {metadata_request_cooldown, positive_integer, {default, 333}}],
   case normalizerl:normalize_proplist(Schema, Config) of
     {ok, [Brokers, MaxMetadataRetries, ClientId, Topics, RetryInterval,
-          RetryOnTopicError]} ->
+          RetryOnTopicError, MetadataRequestCooldown]} ->
       State = #state{config               = Config,
                      known_topics         = Topics,
                      brokers              = Brokers,
                      client_id            = ClientId,
                      retry_interval       = RetryInterval,
                      retry_on_topic_error = RetryOnTopicError,
-                     max_metadata_retries = MaxMetadataRetries},
+                     max_metadata_retries = MaxMetadataRetries,
+                     metadata_request_cd  = MetadataRequestCooldown},
       Request = metadata_request(State, Topics),
       % Start requesting metadata
       Params = [self(), Brokers, get_metadata_tcp_options(), MaxMetadataRetries,
@@ -177,41 +187,41 @@ init([Config]) ->
       {stop, bad_config}
   end.
 
+handle_send(Message, State = #state{retry_on_topic_error = false}) ->
+  % The topic didn't exist, ignore
+  {Topic, _Partition, Payload} = Message,
+  lager:error("Dropping ~p sent to non existing topic ~p", [Payload, Topic]),
+  {reply, ok, State};
 handle_send(Message, State = #state{broker_mapping = void,
                                     pending = Pending}) ->
-  % If we are waiting for the metadata, just save the message and move on
-  % TODO: Using the buffer instead of a list in the gen_server will be safer
+  % Maybe have a new buffer
   {reply, ok, State#state{pending = [Message | Pending]}};
-handle_send(Message, State = #state{broker_mapping = Mapping,
-                                    known_topics = KnownTopics,
-                                    retry_on_topic_error = RetryTopics}) ->
+handle_send(Message, State = #state{broker_mapping = Mapping, pending = Pending,
+                                    known_topics = KnownTopics}) ->
   {Topic, Partition, Payload} = Message,
-  _ = case {lists:keyfind({Topic, Partition}, 1, Mapping), RetryTopics} of
-        {false, false} ->
-          % When retry topics is false, just fail
-          lager:error("Dropping ~p sent to non existing topic ~p",
-                      [Payload, Topic]),
-          {error, invalid_topic};
-        {false, true} ->
-          % We need to check if the topic is valid, if it is and the partition
-          % is invalid, then retrying is not going to work. Otherwise, we just
-          % send the message to any broker as this will later on trigger a new
-          % metadata request. There might be better ways of handling this, but
-          % you should not be constantly sending messages to new topics anyway
-          case lists:any(fun({{T, _}, _}) -> T =:= Topic end, Mapping) of
-            true ->
-              lager:error("Dropping ~p sent to topic ~p, partition ~p",
-                          [Payload, Topic, Partition]),
-              {error, invalid_topic};
-            false ->
-              [{_, Broker} | _] = Mapping,
-              kafkerl_broker_connection:send(Broker, Message)
-          end;
-        {{_, Broker}, _} ->
-          kafkerl_broker_connection:send(Broker, Message)
-      end,
-  NewKnownTopics = lists:umerge([Topic], KnownTopics),
-  {reply, ok, State#state{known_topics = NewKnownTopics}}.
+  case lists:any(fun({K, _}) -> K =:= {Topic, Partition} end, Mapping) of
+    true ->
+      % We need to check if the topic/partition pair exists, this is because the
+      % ets takes some time to start, so some messages could be lost.
+      % Therefore if we have the topic/partition, just send it again (the order
+      % will suffer though)
+      send(self(), Message),
+      {reply, ok, State};
+    false ->
+      % Now, if the topic/partition was not valid, we need to check if the topic
+      % exists, if it does, just drop the message as we can assume no partitions
+      % are created.
+      case lists:any(fun({{T, _}, _}) -> T =:= Topic end, Mapping) of
+        true ->
+          lager:error("Dropping ~p sent to topic ~p, partition ~p",
+                      [Payload, Topic, Partition]),
+          {reply, ok, State};
+        false ->
+          NewKnownTopics = lists:umerge([Topic], KnownTopics),
+          NewState = State#state{pending = [Message | Pending]},
+          {reply, ok, handle_request_metadata(NewState, NewKnownTopics)}
+      end
+  end.
 
 handle_get_partitions(#state{broker_mapping = void}) ->
   {error, not_available};
@@ -228,8 +238,18 @@ handle_request_metadata(State, NewTopics) ->
   Params = [self(), State#state.brokers, get_metadata_tcp_options(),
             State#state.max_metadata_retries, State#state.retry_interval,
             Request],
-  _Pid = spawn_link(?MODULE, request_metadata, Params),
-  State#state{broker_mapping = void, known_topics = NewKnownTopics}.
+  {A, B, C} = erlang:now(),
+  Now = (A * 1000000 + B) * 1000 + C div 1000,
+  LastRequest = State#state.last_metadata_request,
+  Cooldown = State#state.metadata_request_cd,
+  _ = case Cooldown - (Now - LastRequest) of
+        Negative when Negative < 0 ->
+          _ = spawn_link(?MODULE, request_metadata, Params);
+        NonNegative ->
+          _ = timer:apply_after(NonNegative, ?MODULE, request_metadata, Params)
+      end,
+  State#state{broker_mapping = void, known_topics = NewKnownTopics,
+              last_metadata_request = Now}.
 
 %%==============================================================================
 %% Utils
@@ -359,12 +379,19 @@ get_broker_mapping([], _State, _N, Acc) ->
   [{Key, Address} || {_ConnId, Key, Address} <- Acc];
 get_broker_mapping([{{Topic, Partition, ConnId}, Address} | T],
                    State = #state{config = Config}, N, Acc) ->
+  Buffer = kafkerl_utils:buffer_name(Topic, Partition),
+  _ = ets_buffer:create(Buffer, fifo),
   {Conn, NewN} = case lists:keyfind(ConnId, 1, Acc) of
                    false ->
                      {start_broker_connection(N, Address, Config), N + 1};
                    {ConnId, _, BrokerConnection} ->
                      {BrokerConnection, N}
                  end,
+
+  Buffer = kafkerl_utils:buffer_name(Topic, Partition),
+  _ = ets_buffer:create(Buffer, fifo),
+  kafkerl_broker_connection:add_buffer(Conn, Buffer),
+
   NewMapping = {ConnId, {Topic, Partition}, Conn},
   get_broker_mapping(T, State, NewN, [NewMapping | Acc]).
 
@@ -373,8 +400,8 @@ start_broker_connection(N, Address, Config) ->
     {ok, Name, _Pid} ->
       Name;
     {error, {already_started, Pid}} ->
-      kafkerl_broker_connection:kill(Pid),
-      start_broker_connection(N, Address, Config)
+      kafkerl_broker_connection:clear_buffers(Pid),
+      Pid
   end.
 
 % This is used to return the available partitions for each topic

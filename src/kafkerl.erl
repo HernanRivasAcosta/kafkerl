@@ -6,7 +6,8 @@
          get_partitions/0, get_partitions/1,
          subscribe/1, subscribe/2, subscribe/3,
          unsubscribe/1, unsubscribe/2,
-         request_metadata/0, request_metadata/1, request_metadata/2]).
+         request_metadata/0, request_metadata/1, request_metadata/2,
+         valid_message/1]).
 
 -include("kafkerl.hrl").
 -include("kafkerl_consumers.hrl").
@@ -52,7 +53,6 @@ subscribe(Name, Callback) ->
 subscribe(Name, Callback, Filter) ->
   kafkerl_connector:subscribe(Name, Callback, Filter).
 
-
 -spec unsubscribe(callback()) -> ok.
 unsubscribe(Callback) ->
   unsubscribe(?MODULE, Callback).
@@ -71,3 +71,7 @@ request_metadata(Topics) ->
 -spec request_metadata(atom(), [topic()]) -> ok.
 request_metadata(Name, Topics) ->
   kafkerl_connector:request_metadata(Name, Topics).
+
+-spec valid_message(any()) -> boolean().
+valid_message(Any) ->
+  kafkerl_utils:valid_message(Any).

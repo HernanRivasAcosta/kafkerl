@@ -3,7 +3,8 @@
 
 -export([send_event/2, send_error/2]).
 -export([get_tcp_options/1]).
--export([merge_messages/1]).
+-export([merge_messages/1, split_messages/1, valid_message/1]).
+-export([buffer_name/2]).
 
 -include("kafkerl.hrl").
 -include("kafkerl_consumers.hrl").
@@ -41,9 +42,36 @@ get_tcp_options(Options) -> % TODO: refactor
 merge_messages(Topics) ->
   merge_topics(Topics).
 
+% Not as costly, but still avoid this in a place where performance is critical
+-spec split_messages(merged_message()) -> [basic_message()].
+split_messages({Topic, {Partition, Messages}}) ->
+  {Topic, Partition, Messages};
+split_messages({Topic, Partitions}) ->
+  [{Topic, Partition, Messages} || {Partition, Messages} <- Partitions];
+split_messages(Topics) ->
+  lists:flatten([split_messages(Topic) || Topic <- Topics]).
+
+-spec valid_message(any()) -> boolean().
+valid_message({Topic, Partition, Messages}) ->
+  is_binary(Topic) andalso is_integer(Partition) andalso Partition >= 0 andalso
+  (is_binary(Messages) orelse is_list_of_binaries(Messages));
+valid_message({Topic, Partition}) ->
+  is_binary(Topic) andalso (is_partition(Partition) orelse
+                            is_partition_list(Partition));
+valid_message(L) when is_list(L) ->
+  lists:all(fun valid_message/1, L);
+valid_message(_Any) ->
+  false.
+
+-spec buffer_name(topic(), partition()) -> atom().
+buffer_name(Topic, Partition) ->
+  Bin = <<Topic/binary, $., (integer_to_binary(Partition))/binary, "_buffer">>,
+  binary_to_atom(Bin, utf8).
+
 %%==============================================================================
 %% Utils
 %%==============================================================================
+%% Merge
 merge_topics({Topic, Partition, Message}) ->
   merge_topics([{Topic, Partition, Message}]);
 merge_topics([{Topic, Partition, Message}]) ->
@@ -85,3 +113,19 @@ merge_messages(A, B) ->
     {true, false}  -> [B | A];
     {false, false} -> [B, A]
   end.
+
+is_list_of_binaries(L) when is_list(L) ->
+  length(L) > 0 andalso lists:all(fun is_binary/1, L);
+is_list_of_binaries(_Any) ->
+  false.
+
+is_partition_list(L) when is_list(L) ->
+  length(L) > 0 andalso lists:all(fun is_partition/1, L);
+is_partition_list(_Any) ->
+  false.
+
+is_partition({Partition, Messages}) ->
+  is_integer(Partition) andalso Partition >= 0 andalso
+  (is_binary(Messages) orelse is_list_of_binaries(Messages));
+is_partition(_Any) ->
+  false.
