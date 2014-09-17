@@ -178,7 +178,7 @@ handle_tcp_data(Bin, State = #state{connector = Connector, ets = EtsName}) ->
           State;
         {request_metadata, MessagesToResend} ->
           kafkerl_connector:request_metadata(Connector),
-          F = fun(M) -> kafkerl_connector:send(Connector, M) end,
+          F = fun(M) -> kafkerl_connector:send(Connector, M, []) end,
           ok = lists:foreach(F, MessagesToResend),
           State
       end;
