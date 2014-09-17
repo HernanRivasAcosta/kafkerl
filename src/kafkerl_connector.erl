@@ -4,7 +4,7 @@
 -behaviour(gen_server).
 
 %% API
--export([send/2, send/3, request_metadata/1, request_metadata/2, subscribe/2,
+-export([send/3, request_metadata/1, request_metadata/2, subscribe/2,
          subscribe/3, get_partitions/1, unsubscribe/2]).
 % Only for internal use
 -export([request_metadata/6]).
@@ -34,7 +34,8 @@
                 known_topics            = [] :: [binary()],
                 pending                 = [] :: [basic_message()],
                 last_metadata_request    = 0 :: integer(),
-                metadata_request_cd      = 0 :: integer()}).
+                metadata_request_cd      = 0 :: integer(),
+                last_dump_name     = {"", 0} :: {string(), integer()}}).
 -type state() :: #state{}.
 
 %%==============================================================================
@@ -44,18 +45,21 @@
 start_link(Name, Config) ->
   gen_server:start_link({local, Name}, ?MODULE, [Config], []).
 
--spec send(server_ref(), basic_message()) -> ok | error().
-send(ServerRef, Message) ->
-  send(ServerRef, Message, 1000).
--spec send(server_ref(), basic_message(), integer() | infinity) -> ok | error().
-send(ServerRef, {Topic, Partition, Payload} = Message, Timeout) ->
+-spec send(server_ref(), basic_message(), kafkerl:produce_option()) ->
+  ok | error().
+send(ServerRef, {Topic, Partition, _Payload} = Message, Options) ->
   Buffer = kafkerl_utils:buffer_name(Topic, Partition),
   case ets_buffer:write(Buffer, Message) of
-    NewCount when is_integer(NewCount) ->
-      ok;
+    NewSize when is_integer(NewSize) ->
+      case lists:keyfind(buffer_size, 1, Options) of
+        {buffer_size, MaxSize} when NewSize > MaxSize ->
+          gen_server:call(ServerRef, {dump_buffer_to_disk, Buffer, Options});
+        _ ->
+          ok
+      end;
     Error ->
       lager:debug("unable to send message to ~p, reason: ~p", [Buffer, Error]),
-      gen_server:call(ServerRef, {send, Message}, Timeout)
+      gen_server:call(ServerRef, {send, Message})
   end.
 
 -spec get_partitions(server_ref()) -> [{topic(), [partition()]}] | error().
@@ -95,6 +99,15 @@ produce_succeeded(ServerRef, Messages) ->
 %%==============================================================================
 -spec handle_call(any(), any(), state()) -> {reply, ok, state()} |
                                             {reply, {error, any()}, state()}.
+handle_call({dump_buffer_to_disk, Buffer, Options}, _From, State) ->
+  {DumpNameStr, _} = DumpName = get_ets_dump_name(State#state.last_dump_name),
+  AllMessages = ets_buffer:read_all(Buffer),
+  FilePath = proplists:get_value(dump_location, Options, "") ++ DumpNameStr,
+  ok = case file:write_file(FilePath, term_to_binary(AllMessages)) of
+         ok    -> lager:debug("Dumped unsent messages at ~p", [FilePath]);
+         Error -> lager:critical("Unable to save messages, reason: ~p", [Error])
+       end,
+  {reply, ok, State#state{last_dump_name = DumpName}};
 handle_call({send, Message}, _From, State) ->
   handle_send(Message, State);
 handle_call({request_metadata}, _From, State) ->
@@ -132,7 +145,7 @@ handle_info({metadata_updated, Mapping}, State) ->
   lager:debug("Known topics: ~p", [NewKnownTopics]),
   % Reverse the pending messages and try to send them again
   RPending = lists:reverse(State#state.pending),
-  ok = lists:foreach(fun(P) -> send(self(), P) end, RPending),
+  ok = lists:foreach(fun(P) -> send(self(), P, []) end, RPending),
   {noreply, State#state{broker_mapping = NewBrokerMapping, pending = [],
                         callbacks = NewCallbacks,
                         known_topics = NewKnownTopics}};
@@ -205,7 +218,7 @@ handle_send(Message, State = #state{broker_mapping = Mapping, pending = Pending,
       % ets takes some time to start, so some messages could be lost.
       % Therefore if we have the topic/partition, just send it again (the order
       % will suffer though)
-      send(self(), Message),
+      send(self(), Message, []),
       {reply, ok, State};
     false ->
       % Now, if the topic/partition was not valid, we need to check if the topic
@@ -254,6 +267,18 @@ handle_request_metadata(State, NewTopics) ->
 %%==============================================================================
 %% Utils
 %%==============================================================================
+get_ets_dump_name({OldName, Counter}) ->
+  {{Year, Month, Day}, {Hour, Minute, Second}} = calendar:local_time(),
+  Ts = io_lib:format("~4.10.0B~2.10.0B~2.10.0B~2.10.0B~2.10.0B~2.10.0B_",
+                     [Year, Month, Day, Hour, Minute, Second]),
+  PartitalNewName = "kafkerl_messages_" ++ Ts,
+  case lists:prefix(PartitalNewName, OldName) of
+    true ->
+      {PartitalNewName ++ integer_to_list(Counter + 1) ++ ".dump", Counter + 1};
+    _ ->
+      {PartitalNewName ++ "0.dump", 0}
+  end.
+
 get_metadata_tcp_options() ->
   kafkerl_utils:get_tcp_options([{active, false}]).
 

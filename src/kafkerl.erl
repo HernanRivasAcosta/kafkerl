@@ -12,6 +12,13 @@
 -include("kafkerl.hrl").
 -include("kafkerl_consumers.hrl").
 
+%% Types
+-type produce_option()  :: {buffer_size, integer() | infinity} | 
+                           {dump_location, string()}.
+-type produce_options() :: [produce_option()].
+
+-export_type([produce_options/0]).
+
 %%==============================================================================
 %% API
 %%==============================================================================
@@ -28,9 +35,15 @@ start(_StartType, _StartArgs) ->
 -spec produce(basic_message()) -> ok.
 produce(Message) ->
   produce(?MODULE, Message).
--spec produce(atom(), basic_message()) -> ok.
+-spec produce(atom(), basic_message()) -> ok;
+             (basic_message(), produce_options()) -> ok.
+produce(Message, Options) when is_tuple(Message) ->
+  produce(?MODULE, Message, Options);
 produce(Name, Message) ->
-  kafkerl_connector:send(Name, Message).
+  produce(Name, Message, []).
+-spec produce(atom(), basic_message(), produce_options()) -> ok.
+produce(Name, Message, Options) ->
+  kafkerl_connector:send(Name, Message, Options).
 
 -spec get_partitions() -> [{topic(), [partition()]}] | error().
 get_partitions() ->
