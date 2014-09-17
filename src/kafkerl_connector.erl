@@ -271,12 +271,12 @@ get_ets_dump_name({OldName, Counter}) ->
   {{Year, Month, Day}, {Hour, Minute, Second}} = calendar:local_time(),
   Ts = io_lib:format("~4.10.0B~2.10.0B~2.10.0B~2.10.0B~2.10.0B~2.10.0B_",
                      [Year, Month, Day, Hour, Minute, Second]),
-  PartitalNewName = "kafkerl_messages_" ++ Ts,
-  case lists:prefix(PartitalNewName, OldName) of
+  PartialNewName = "kafkerl_messages_" ++ lists:flatten(Ts),
+  case lists:prefix(PartialNewName, OldName) of
     true ->
-      {PartitalNewName ++ integer_to_list(Counter + 1) ++ ".dump", Counter + 1};
+      {PartialNewName ++ integer_to_list(Counter + 1) ++ ".dump", Counter + 1};
     _ ->
-      {PartitalNewName ++ "0.dump", 0}
+      {PartialNewName ++ "0.dump", 0}
   end.
 
 get_metadata_tcp_options() ->
