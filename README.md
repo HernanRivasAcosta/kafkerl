@@ -18,4 +18,5 @@ Developed thanks to the support and sponsorship of [TigerText](http://www.tigert
  - Tests suites.
 
 
-Special thanks to @nitzanharel who not only found some really nasty bugs and helped me understand the subtelties of kafka's design and to the rest [TigerText](http://www.tigertext.com/) team and their support and code reviews.
+
+Special thanks to [@nitzanharel](https://github.com/nitzanharel) who found some really nasty bugs and helped me understand the subtleties of kafka's design and to the rest of the [TigerText](http://www.tigertext.com/) team for their support and code reviews.
