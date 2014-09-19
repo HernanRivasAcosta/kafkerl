@@ -128,8 +128,8 @@ init([Id, Connector, Address, Config, Name]) ->
 
 handle_flush(State = #state{socket = undefined}) ->
   {noreply, State};
-handle_flush(State = #state{socket = Socket, conn_idx = ConnIdx, ets = EtsName,
-                            client_id = ClientId, buffers = Buffers}) ->
+handle_flush(State = #state{socket = Socket, ets = EtsName, buffers = Buffers,
+                            client_id = ClientId, connector = Connector}) ->
   {ok, CorrelationId, NewState} = build_correlation_id(State),
   % TODO: Maybe buffer all this messages in case something goes wrong
   AllMessages = get_all_messages(Buffers),
@@ -145,8 +145,10 @@ handle_flush(State = #state{socket = Socket, conn_idx = ConnIdx, ets = EtsName,
       lager:debug("Sending ~p", [Request]),
       case gen_tcp:send(Socket, Request) of
         {error, Reason} ->
-          lager:warning("unable to write to socket, reason: ~p", [Reason]),
+          lager:critical("unable to write to socket, reason: ~p", [Reason]),
           gen_tcp:close(Socket),
+          ets:delete_all_objects(EtsName, CorrelationId),
+          ok = resend_messages(MergedMessages, Connector),
           {noreply, handle_tcp_close(NewState)};
         ok ->
           lager:debug("message ~p sent", [CorrelationId]),
@@ -166,21 +168,24 @@ handle_tcp_close(State = #state{retry_interval = RetryInterval,
 handle_tcp_data(Bin, State = #state{connector = Connector, ets = EtsName}) ->
   case kafkerl_protocol:parse_produce_response(Bin) of
     {ok, CorrelationId, Topics} ->
-      [{CorrelationId, Messages}] = ets:lookup(EtsName, CorrelationId),
-      ets:delete(EtsName, CorrelationId),
-      {Errors, Successes} = separate_errors(Topics),
-      % First, send the offsets and messages that were delivered
-      spawn(fun() ->
-              notify_success_to_connector(Successes, Messages, Connector)
-            end),
-      case handle_errors(Errors, Messages) of
-        ignore ->
-          State;
-        {request_metadata, MessagesToResend} ->
-          kafkerl_connector:request_metadata(Connector),
-          F = fun(M) -> kafkerl_connector:send(Connector, M) end,
-          ok = lists:foreach(F, MessagesToResend),
-          State
+      case ets:lookup(EtsName, CorrelationId) of
+        [{CorrelationId, Messages}] ->
+          ets:delete(EtsName, CorrelationId),
+          {Errors, Successes} = separate_errors(Topics),
+          % First, send the offsets and messages that were delivered
+          spawn(fun() ->
+                  notify_success_to_connector(Successes, Messages, Connector)
+                end),
+          case handle_errors(Errors, Messages) of
+            ignore ->
+              State;
+            {request_metadata, MessagesToResend} ->
+              kafkerl_connector:request_metadata(Connector),
+              ok = resend_messages(MessagesToResend, Connector),
+              State
+          end;
+        _ ->
+          lager:warning("unable to properly process produce response")
       end;
     Other ->
      lager:critical("unexpected response when parsing message: ~p", [Other]),
@@ -190,6 +195,10 @@ handle_tcp_data(Bin, State = #state{connector = Connector, ets = EtsName}) ->
 %%==============================================================================
 %% Utils
 %%==============================================================================
+resend_messages(Messages, Connector) ->
+  F = fun(M) -> kafkerl_connector:send(Connector, M, []) end,
+  lists:foreach(F, Messages).
+
 notify_success_to_connector([], _Messages, _Pid) ->
   ok;
 notify_success_to_connector([{Topic, Partition, Offset} | T], Messages, Pid) ->
