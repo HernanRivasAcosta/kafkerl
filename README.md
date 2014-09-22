@@ -1,4 +1,4 @@
-kafkerl v1.0.0
+kafkerl v1.0.1
 ==============
 
 Apache Kafka 0.8 high performance producer for erlang.

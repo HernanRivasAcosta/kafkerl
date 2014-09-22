@@ -2,7 +2,8 @@
 -author('hernanrivasacosta@gmail.com').
 
 -export([start/0, start/2]).
--export([produce/1, produce/2,
+-export([version/0,
+         produce/1, produce/2,
          get_partitions/0, get_partitions/1,
          subscribe/1, subscribe/2, subscribe/3,
          unsubscribe/1, unsubscribe/2,
@@ -32,6 +33,10 @@ start(_StartType, _StartArgs) ->
 %%==============================================================================
 %% Access API
 %%==============================================================================
+-spec version() -> {integer(), integer(), integer()}.
+version() ->
+  {1, 1, 1}.
+
 -spec produce(basic_message()) -> ok.
 produce(Message) ->
   produce(?MODULE, Message).
