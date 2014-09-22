@@ -11,7 +11,7 @@ show_help() {
 
 # default values
 z="zookeeper.properties"
-k="server.properties"
+k="server0.properties"
 
 while true ; do
   case "$1" in

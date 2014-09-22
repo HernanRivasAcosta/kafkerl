@@ -10,3 +10,4 @@ log
 *.bak
 rebar
 .rebar
+*.dump
