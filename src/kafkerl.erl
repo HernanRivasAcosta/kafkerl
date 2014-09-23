@@ -3,7 +3,8 @@
 
 -export([start/0, start/2]).
 -export([version/0,
-         produce/1, produce/2,
+         produce/1, produce/2, produce_messages_from_file/1,
+         produce_messages_from_file/2, produce_messages_from_file/3,
          get_partitions/0, get_partitions/1,
          subscribe/1, subscribe/2, subscribe/3,
          unsubscribe/1, unsubscribe/2,
@@ -49,6 +50,22 @@ produce(Name, Message) ->
 -spec produce(atom(), basic_message(), produce_options()) -> ok.
 produce(Name, Message, Options) ->
   kafkerl_connector:send(Name, Message, Options).
+
+-spec produce_messages_from_file(string()) -> ok.
+produce_messages_from_file(Filename) ->
+  produce_messages_from_file(?MODULE, Filename).
+-spec produce_messages_from_file(atom(), basic_message()) -> ok;
+                                (string(), produce_options()) -> ok.
+produce_messages_from_file(Filename, Options) when is_list(Filename) ->
+  produce_messages_from_file(?MODULE, Filename, Options);
+produce_messages_from_file(Name, Filename) ->
+  produce_messages_from_file(Name, Filename, []).
+-spec produce_messages_from_file(atom(), string(), produce_options()) -> ok.
+produce_messages_from_file(Name, Filename, Options) ->
+  {ok, Bin} = file:read_file(Filename),
+  Messages = binary_to_term(Bin),
+  [produce(Name, M, Options) || M <- Messages],
+  ok.
 
 -spec get_partitions() -> [{topic(), [partition()]}] | error().
 get_partitions() ->
