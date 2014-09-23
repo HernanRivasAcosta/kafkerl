@@ -104,7 +104,7 @@ init([Id, Connector, Address, Config, Name]) ->
             {retry_interval, positive_integer, {default, 1000}},
             {max_retries, positive_integer, {default, 3}},
             {client_id, binary, {default, <<"kafkerl_client">>}},
-            {max_time_queued, positive_integer, {default, 30}}],
+            {max_time_queued, positive_integer, required}],
   case normalizerl:normalize_proplist(Schema, Config) of
     {ok, [TCPOpts, RetryInterval, MaxRetries, ClientId, MaxTimeQueued]} ->
       NewTCPOpts = kafkerl_utils:get_tcp_options(TCPOpts),
