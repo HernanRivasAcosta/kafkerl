@@ -11,3 +11,4 @@ log
 rebar
 .rebar
 *.dump
+bin/tmp

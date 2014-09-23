@@ -29,7 +29,7 @@
                 max_metadata_retries    = -1 :: integer(),
                 retry_interval           = 1 :: non_neg_integer(),
                 config                  = [] :: {atom(), any()},
-                retry_on_topic_error = false :: boolean(),
+                autocreate_topics    = false :: boolean(),
                 callbacks               = [] :: [{filters(), callback()}],
                 known_topics            = [] :: [binary()],
                 pending                 = [] :: [basic_message()],
@@ -174,17 +174,17 @@ init([Config]) ->
             {client_id, binary, {default, <<"kafkerl_client">>}},
             {topics, [binary], required},
             {metadata_tcp_timeout, positive_integer, {default, 1500}},
-            {retry_on_topic_error, boolean, {default, false}},
+            {assume_autocreate_topics, boolean, {default, false}},
             {metadata_request_cooldown, positive_integer, {default, 333}}],
   case normalizerl:normalize_proplist(Schema, Config) of
     {ok, [Brokers, MaxMetadataRetries, ClientId, Topics, RetryInterval,
-          RetryOnTopicError, MetadataRequestCooldown]} ->
+          AutocreateTopics, MetadataRequestCooldown]} ->
       State = #state{config               = Config,
                      known_topics         = Topics,
                      brokers              = Brokers,
                      client_id            = ClientId,
                      retry_interval       = RetryInterval,
-                     retry_on_topic_error = RetryOnTopicError,
+                     autocreate_topics    = AutocreateTopics,
                      max_metadata_retries = MaxMetadataRetries,
                      metadata_request_cd  = MetadataRequestCooldown},
       Request = metadata_request(State, Topics),
@@ -200,7 +200,7 @@ init([Config]) ->
       {stop, bad_config}
   end.
 
-handle_send(Message, State = #state{retry_on_topic_error = false}) ->
+handle_send(Message, State = #state{autocreate_topics = false}) ->
   % The topic didn't exist, ignore
   {Topic, _Partition, Payload} = Message,
   lager:error("Dropping ~p sent to non existing topic ~p", [Payload, Topic]),
@@ -377,7 +377,12 @@ get_topic_mapping({BrokerMetadata, TopicMetadata}) ->
                     end
                   end, Partitions).
 
-expand_topic({0, Topic, Partitions}) ->
+expand_topic({?NO_ERROR, Topic, Partitions}) ->
+  {true, {Topic, Partitions}};
+expand_topic({Error = ?REPLICA_NOT_AVAILABLE, Topic, Partitions}) ->
+  % Replica not available can be ignored, still, show a warning
+  lager:warning("Ignoring ~p on metadata for topic ~p",
+                [kafkerl_error:get_error_name(Error), Topic]),
   {true, {Topic, Partitions}};
 expand_topic({Error, Topic, _Partitions}) ->
   lager:error("Error ~p on metadata for topic ~p",
@@ -389,7 +394,13 @@ expand_partitions(Metadata) ->
 
 expand_partitions({_Topic, []}, Acc) ->
   {true, Acc};
-expand_partitions({Topic, [{0, Partition, Leader, _, _} | T]}, Acc) ->
+expand_partitions({Topic, [{?NO_ERROR, Partition, Leader, _, _} | T]}, Acc) ->
+  ExpandedPartition = {{Topic, Partition}, Leader},
+  expand_partitions({Topic, T}, [ExpandedPartition | Acc]);
+expand_partitions({Topic, [{Error = ?REPLICA_NOT_AVAILABLE, Partition, Leader,
+                            _, _} | T]}, Acc) ->
+  lager:warning("Ignoring ~p on metadata for topic ~p, partition ~p",
+                [kafkerl_error:get_error_name(Error), Topic, Partition]),
   ExpandedPartition = {{Topic, Partition}, Leader},
   expand_partitions({Topic, T}, [ExpandedPartition | Acc]);
 expand_partitions({Topic, [{Error, Partition, _, _, _} | T]}, Acc) ->
