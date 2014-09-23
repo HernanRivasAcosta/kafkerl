@@ -6,7 +6,7 @@
 %% API
 -export([add_buffer/2, clear_buffers/1]).
 % Only for internal use
--export([connect/5]).
+-export([connect/6]).
 % Supervisors
 -export([start_link/4]).
 % gen_server callbacks
@@ -74,8 +74,9 @@ handle_info({connected, Socket}, State) ->
   handle_flush(State#state{socket = Socket});
 handle_info(connection_timeout, State) ->
   {stop, {error, unable_to_connect}, State};
-handle_info({tcp_closed, _Socket}, State = #state{address = {Host, Port}}) ->
-  lager:warning("lost connection to ~p:~p", [Host, Port]),
+handle_info({tcp_closed, _Socket}, State = #state{name = Name,
+                                                  address = {Host, Port}}) ->
+  lager:warning("~p lost connection to ~p:~p", [Name, Host, Port]),
   NewState = handle_tcp_close(State),
   {noreply, NewState};
 handle_info({tcp, _Socket, Bin}, State) ->
@@ -84,8 +85,8 @@ handle_info({tcp, _Socket, Bin}, State) ->
 handle_info({flush, Time}, State) ->
   {ok, _Tref} = queue_flush(Time),
   handle_flush(State);
-handle_info(Msg, State) ->
-  lager:notice("unexpected info message received: ~p on ~p", [Msg, State]),
+handle_info(Msg, State = #state{name = Name}) ->
+  lager:notice("~p received unexpected info message: ~p on ~p", [Name, Msg]),
   {noreply, State}.
 
 % Boilerplate
@@ -104,7 +105,7 @@ init([Id, Connector, Address, Config, Name]) ->
             {retry_interval, positive_integer, {default, 1000}},
             {max_retries, positive_integer, {default, 3}},
             {client_id, binary, {default, <<"kafkerl_client">>}},
-            {max_time_queued, positive_integer, {default, 30}}],
+            {max_time_queued, positive_integer, required}],
   case normalizerl:normalize_proplist(Schema, Config) of
     {ok, [TCPOpts, RetryInterval, MaxRetries, ClientId, MaxTimeQueued]} ->
       NewTCPOpts = kafkerl_utils:get_tcp_options(TCPOpts),
@@ -115,7 +116,7 @@ init([Id, Connector, Address, Config, Name]) ->
                      max_retries = MaxRetries, retry_interval = RetryInterval,
                      connector = Connector, client_id = ClientId, name = Name,
                      max_time_queued = MaxTimeQueued, ets = EtsName},
-      Params = [self(), NewTCPOpts, Address, RetryInterval, MaxRetries],
+      Params = [self(), Name, NewTCPOpts, Address, RetryInterval, MaxRetries],
       _Pid = spawn_link(?MODULE, connect, Params),
       {ok, _Tref} = queue_flush(MaxTimeQueued),
       {ok, State};
@@ -128,8 +129,11 @@ init([Id, Connector, Address, Config, Name]) ->
 
 handle_flush(State = #state{socket = undefined}) ->
   {noreply, State};
+handle_flush(State = #state{buffers = []}) ->
+  {noreply, State};
 handle_flush(State = #state{socket = Socket, ets = EtsName, buffers = Buffers,
-                            client_id = ClientId, connector = Connector}) ->
+                            client_id = ClientId, connector = Connector,
+                            name = Name}) ->
   {ok, CorrelationId, NewState} = build_correlation_id(State),
   % TODO: Maybe buffer all this messages in case something goes wrong
   AllMessages = get_all_messages(Buffers),
@@ -142,16 +146,17 @@ handle_flush(State = #state{socket = Socket, ets = EtsName, buffers = Buffers,
                                                        CorrelationId,
                                                        ?COMPRESSION_NONE),
       true = ets:insert_new(EtsName, {CorrelationId, MergedMessages}),
-      lager:debug("Sending ~p", [Request]),
+      lager:debug("~p sending ~p", [Name, Request]),
       case gen_tcp:send(Socket, Request) of
         {error, Reason} ->
-          lager:critical("unable to write to socket, reason: ~p", [Reason]),
+          lager:critical("~p was unable to write to socket, reason: ~p",
+                         [Name, Reason]),
           gen_tcp:close(Socket),
           ets:delete_all_objects(EtsName, CorrelationId),
           ok = resend_messages(MergedMessages, Connector),
           {noreply, handle_tcp_close(NewState)};
         ok ->
-          lager:debug("message ~p sent", [CorrelationId]),
+          lager:debug("~p sent message ~p", [Name, CorrelationId]),
           {noreply, NewState}
       end
   end.
@@ -160,12 +165,14 @@ handle_flush(State = #state{socket = Socket, ets = EtsName, buffers = Buffers,
 handle_tcp_close(State = #state{retry_interval = RetryInterval,
                                 tcp_options = TCPOpts,
                                 max_retries = MaxRetries,
-                                address = Address}) ->
-  Params = [self(), TCPOpts, Address, RetryInterval, MaxRetries],
+                                address = Address,
+                                name = Name}) ->
+  Params = [self(), Name, TCPOpts, Address, RetryInterval, MaxRetries],
   _Pid = spawn_link(?MODULE, connect, Params),
   State#state{socket = undefined}.
 
-handle_tcp_data(Bin, State = #state{connector = Connector, ets = EtsName}) ->
+handle_tcp_data(Bin, State = #state{connector = Connector, ets = EtsName,
+                                    name = Name}) ->
   case kafkerl_protocol:parse_produce_response(Bin) of
     {ok, CorrelationId, Topics} ->
       case ets:lookup(EtsName, CorrelationId) of
@@ -176,7 +183,7 @@ handle_tcp_data(Bin, State = #state{connector = Connector, ets = EtsName}) ->
           spawn(fun() ->
                   notify_success_to_connector(Successes, Messages, Connector)
                 end),
-          case handle_errors(Errors, Messages) of
+          case handle_errors(Errors, Messages, Name) of
             ignore ->
               State;
             {request_metadata, MessagesToResend} ->
@@ -185,10 +192,12 @@ handle_tcp_data(Bin, State = #state{connector = Connector, ets = EtsName}) ->
               State
           end;
         _ ->
-          lager:warning("unable to properly process produce response")
+          lager:warning("~p was unable to properly process produce response",
+                        [Name])
       end;
     Other ->
-     lager:critical("unexpected response when parsing message: ~p", [Other]),
+     lager:critical("~p got unexpected response when parsing message: ~p",
+                    [Name, Other]),
      State
   end.
 
@@ -239,61 +248,61 @@ separate_errors([{Topic, Partitions} | T], Acc) ->
       end,
   separate_errors(T, lists:foldl(F, Acc, Partitions)).
 
-handle_errors([], _Messages) ->
+handle_errors([], _Messages, _Name) ->
   ignore;
-handle_errors(Errors, Messages) ->
-  F = fun(E) -> handle_error(E, Messages) end,
+handle_errors(Errors, Messages, Name) ->
+  F = fun(E) -> handle_error(E, Messages, Name) end,
   case lists:filtermap(F, Errors) of
     [] -> ignore;
     L  -> {request_metadata, L}
   end.
 
-handle_error({Topic, Partition, Error}, Messages)
+handle_error({Topic, Partition, Error}, Messages, Name)
   when Error =:= ?UNKNOWN_TOPIC_OR_PARTITION orelse
        Error =:= ?LEADER_NOT_AVAILABLE orelse
        Error =:= ?NOT_LEADER_FOR_PARTITION ->
-  case get_message_for_error(Topic, Partition, Messages) of
+  case get_message_for_error(Topic, Partition, Messages, Name) of
     undefined -> false;
     Message   -> {true, Message}
   end;
-handle_error({Topic, Partition, Error}, _Messages) ->
-  lager:error("Unable to handle ~p error on topic ~p, partition ~p",
-              [kafkerl_error:get_error_name(Error), Topic, Partition]),
+handle_error({Topic, Partition, Error}, _Messages, Name) ->
+  lager:error("~p was unable to handle ~p error on topic ~p, partition ~p",
+              [Name, kafkerl_error:get_error_name(Error), Topic, Partition]),
   false.
 
-get_message_for_error(Topic, Partition, SavedMessages) ->
+get_message_for_error(Topic, Partition, SavedMessages, Name) ->
   case lists:keyfind(Topic, 1, SavedMessages) of
     false ->
-      lager:error("No saved messages found for topic ~p, partition ~p",
-                  [Topic, Partition]),
+      lager:error("~p found no saved messages for topic ~p, partition ~p",
+                  [Name, Topic, Partition]),
       undefined;
     {Topic, Partitions} ->
       case lists:keyfind(Partition, 1, Partitions) of
         false -> 
-          lager:error("No saved messages found for topic ~p, partition ~p",
-                      [Topic, Partition]),
+          lager:error("~p found no saved messages for topic ~p, partition ~p",
+                      [Name, Topic, Partition]),
           undefined;
         {Partition, Messages} ->
           {Topic, Partition, Messages}
       end
   end.
 
-connect(Pid, _TCPOpts, {Host, Port} = _Address, _Timeout, 0) ->
-  lager:error("Unable to connect to ~p:~p", [Host, Port]),
+connect(Pid, Name, _TCPOpts, {Host, Port} = _Address, _Timeout, 0) ->
+  lager:error("~p was unable to connect to ~p:~p", [Name, Host, Port]),
   Pid ! connection_timeout;
-connect(Pid, TCPOpts, {Host, Port} = Address, Timeout, Retries) ->
-  lager:debug("Attempting connection to broker at ~p:~p", [Host, Port]),
+connect(Pid, Name, TCPOpts, {Host, Port} = Address, Timeout, Retries) ->
+  lager:debug("~p attempting connection to ~p:~p", [Name, Host, Port]),
   case gen_tcp:connect(Host, Port, TCPOpts, 5000) of
     {ok, Socket} ->
-      lager:debug("Connnected to ~p:~p", [Host, Port]),
+      lager:debug("~p connnected to ~p:~p", [Name, Host, Port]),
       gen_tcp:controlling_process(Socket, Pid),
       Pid ! {connected, Socket};
     {error, Reason} ->
       NewRetries = Retries - 1,
-      lager:warning("Unable to connect to ~p:~p. Reason:~p, ~p retries left",
-                    [Host, Port, Reason, NewRetries]),
+      lager:warning("~p can't connect to ~p:~p. Reason: ~p, ~p retries left",
+                    [Name, Host, Port, Reason, NewRetries]),
       timer:sleep(Timeout),
-      connect(Pid, TCPOpts, Address, Timeout, NewRetries)
+      connect(Pid, Name, TCPOpts, Address, Timeout, NewRetries)
   end.
 
 queue_flush(Time) ->

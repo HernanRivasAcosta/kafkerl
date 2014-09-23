@@ -29,7 +29,7 @@
                 max_metadata_retries    = -1 :: integer(),
                 retry_interval           = 1 :: non_neg_integer(),
                 config                  = [] :: {atom(), any()},
-                retry_on_topic_error = false :: boolean(),
+                autocreate_topics    = false :: boolean(),
                 callbacks               = [] :: [{filters(), callback()}],
                 known_topics            = [] :: [binary()],
                 pending                 = [] :: [basic_message()],
@@ -174,17 +174,17 @@ init([Config]) ->
             {client_id, binary, {default, <<"kafkerl_client">>}},
             {topics, [binary], required},
             {metadata_tcp_timeout, positive_integer, {default, 1500}},
-            {retry_on_topic_error, boolean, {default, false}},
+            {assume_autocreate_topics, boolean, {default, false}},
             {metadata_request_cooldown, positive_integer, {default, 333}}],
   case normalizerl:normalize_proplist(Schema, Config) of
     {ok, [Brokers, MaxMetadataRetries, ClientId, Topics, RetryInterval,
-          RetryOnTopicError, MetadataRequestCooldown]} ->
+          AutocreateTopics, MetadataRequestCooldown]} ->
       State = #state{config               = Config,
                      known_topics         = Topics,
                      brokers              = Brokers,
                      client_id            = ClientId,
                      retry_interval       = RetryInterval,
-                     retry_on_topic_error = RetryOnTopicError,
+                     autocreate_topics    = AutocreateTopics,
                      max_metadata_retries = MaxMetadataRetries,
                      metadata_request_cd  = MetadataRequestCooldown},
       Request = metadata_request(State, Topics),
@@ -200,7 +200,7 @@ init([Config]) ->
       {stop, bad_config}
   end.
 
-handle_send(Message, State = #state{retry_on_topic_error = false}) ->
+handle_send(Message, State = #state{autocreate_topics = false}) ->
   % The topic didn't exist, ignore
   {Topic, _Partition, Payload} = Message,
   lager:error("Dropping ~p sent to non existing topic ~p", [Payload, Topic]),
