@@ -377,7 +377,12 @@ get_topic_mapping({BrokerMetadata, TopicMetadata}) ->
                     end
                   end, Partitions).
 
-expand_topic({0, Topic, Partitions}) ->
+expand_topic({?NO_ERROR, Topic, Partitions}) ->
+  {true, {Topic, Partitions}};
+expand_topic({Error = ?REPLICA_NOT_AVAILABLE, Topic, Partitions}) ->
+  % Replica not available can be ignored, still, show a warning
+  lager:warning("Ignoring ~p on metadata for topic ~p",
+                [kafkerl_error:get_error_name(Error), Topic]),
   {true, {Topic, Partitions}};
 expand_topic({Error, Topic, _Partitions}) ->
   lager:error("Error ~p on metadata for topic ~p",
@@ -389,7 +394,13 @@ expand_partitions(Metadata) ->
 
 expand_partitions({_Topic, []}, Acc) ->
   {true, Acc};
-expand_partitions({Topic, [{0, Partition, Leader, _, _} | T]}, Acc) ->
+expand_partitions({Topic, [{?NO_ERROR, Partition, Leader, _, _} | T]}, Acc) ->
+  ExpandedPartition = {{Topic, Partition}, Leader},
+  expand_partitions({Topic, T}, [ExpandedPartition | Acc]);
+expand_partitions({Topic, [{Error = ?REPLICA_NOT_AVAILABLE, Partition, Leader,
+                            _, _} | T]}, Acc) ->
+  lager:warning("Ignoring ~p on metadata for topic ~p, partition ~p",
+                [kafkerl_error:get_error_name(Error), Topic, Partition]),
   ExpandedPartition = {{Topic, Partition}, Leader},
   expand_partitions({Topic, T}, [ExpandedPartition | Acc]);
 expand_partitions({Topic, [{Error, Partition, _, _, _} | T]}, Acc) ->

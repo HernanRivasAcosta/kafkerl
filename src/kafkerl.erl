@@ -36,7 +36,7 @@ start(_StartType, _StartArgs) ->
 %%==============================================================================
 -spec version() -> {integer(), integer(), integer()}.
 version() ->
-  {1, 1, 1}.
+  {1, 1, 2}.
 
 -spec produce(basic_message()) -> ok.
 produce(Message) ->
