@@ -124,7 +124,8 @@ handle_call({subscribe, Callback}, _From, State) ->
       {reply, {error, invalid_callback}, State}
   end;
 handle_call({unsubscribe, Callback}, _From, State) ->
-  {reply, ok, State#state{callbacks = State#state.callbacks -- [Callback]}}.
+  NewCallbacks = lists:keydelete(Callback, 2, State#state.callbacks),
+  {reply, ok, State#state{callbacks = NewCallbacks}}.
 
 handle_info(metadata_timeout, State) ->
   {stop, {error, unable_to_retrieve_metadata}, State};
