@@ -314,4 +314,15 @@ get_all_messages(Buffers) ->
 get_all_messages([], Acc) ->
   Acc;
 get_all_messages([H | T], Acc) ->
-  get_all_messages(T, Acc ++ ets_buffer:read_all(H)).
+  get_all_messages(T, Acc ++ get_messages_from(H, 20)).
+
+get_messages_from(Ets, Retries) ->
+  case ets_buffer:read_all(Ets) of
+    L when is_list(L) ->
+      L;
+    _Error when Retries > 0 ->
+      get_messages_from(Ets, Retries - 1);
+    _Error ->
+      lager:warning("giving up on reading from the ETS buffer"),
+      []
+  end.
