@@ -80,8 +80,10 @@ handle_info({tcp_closed, _Socket}, State = #state{name = Name,
   NewState = handle_tcp_close(State),
   {noreply, NewState};
 handle_info({tcp, _Socket, Bin}, State) ->
-  NewState = handle_tcp_data(Bin, State),
-  {noreply, NewState};
+  case handle_tcp_data(Bin, State) of
+    {ok, NewState}  -> {noreply, NewState};
+    {error, Reason} -> {stop, {error, Reason}, State}
+  end;
 handle_info({flush, Time}, State) ->
   {ok, _Tref} = queue_flush(Time),
   handle_flush(State);
@@ -185,20 +187,21 @@ handle_tcp_data(Bin, State = #state{connector = Connector, ets = EtsName,
                 end),
           case handle_errors(Errors, Messages, Name) of
             ignore ->
-              State;
+              {ok, State};
             {request_metadata, MessagesToResend} ->
               kafkerl_connector:request_metadata(Connector),
               ok = resend_messages(MessagesToResend, Connector),
-              State
+              {ok, State}
           end;
         _ ->
           lager:warning("~p was unable to properly process produce response",
-                        [Name])
+                        [Name]),
+          {error, invalid_produce_response}
       end;
     Other ->
      lager:critical("~p got unexpected response when parsing message: ~p",
                     [Name, Other]),
-     State
+     {ok, State}
   end.
 
 %%==============================================================================
