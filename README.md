@@ -1,5 +1,6 @@
 kafkerl v1.0.2
 ==============
+[![Gitter](https://badges.gitter.im/Join Chat.svg)](https://gitter.im/HernanRivasAcosta/kafkerl?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 
 Apache Kafka 0.8 high performance producer for erlang.
 Developed thanks to the support and sponsorship of [TigerText](http://www.tigertext.com/).

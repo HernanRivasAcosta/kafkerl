@@ -471,14 +471,21 @@ parse_topic_metadata(Count, <<>>, Acc) when Count =< 0 ->
 parse_topic_metadata(Count, Bin, Acc) when Count =< 0 ->
   lager:warning("Finished parsing topic metadata, ignoring bytes: ~p", [Bin]),
   {ok, lists:reverse(Acc)};
-parse_topic_metadata(Count, <<ErrorCode:16/signed-integer,
+parse_topic_metadata(Count, <<0:16/signed-integer,
                               TopicSize:16/unsigned-integer,
                               TopicName:TopicSize/binary,
                               PartitionCount:32/unsigned-integer,
                               PartitionsBin/binary>>, Acc) ->
   {ok, PartitionsMetadata, Remainder} = parse_partition_metadata(PartitionCount,
                                                                  PartitionsBin),
-  TopicMetadata = {ErrorCode, TopicName, PartitionsMetadata},
+  TopicMetadata = {0, TopicName, PartitionsMetadata},
+  parse_topic_metadata(Count - 1, Remainder, [TopicMetadata | Acc]);
+parse_topic_metadata(Count, <<ErrorCode:16/signed-integer,
+                              -1:16/signed-integer, % TopicSize
+                              0:32/unsigned-integer, % PartitionCount
+                              Remainder/binary>>, Acc) ->
+  {ok, PartitionsMetadata, Remainder} = parse_partition_metadata(0, Remainder),
+  TopicMetadata = {ErrorCode, <<"unkown">>, PartitionsMetadata},
   parse_topic_metadata(Count - 1, Remainder, [TopicMetadata | Acc]).
   
 parse_partition_metadata(Count, Bin) ->
