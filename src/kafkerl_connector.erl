@@ -292,7 +292,7 @@ get_ets_dump_name({OldName, Counter}) ->
   end.
 
 get_metadata_tcp_options() ->
-  kafkerl_utils:get_tcp_options([{active, false}]).
+  kafkerl_utils:get_tcp_options([{active, false}, {packet, 4}]).
 
 do_request_metadata(Pid, _Brokers, _TCPOpts, 0, _RetryInterval, _Request) ->
   Pid ! metadata_timeout;
