@@ -158,6 +158,9 @@ handle_info({metadata_updated, Mapping}, State) ->
   {noreply, State#state{broker_mapping = NewBrokerMapping, pending = [],
                         callbacks = NewCallbacks,
                         known_topics = NewKnownTopics}};
+handle_info({'DOWN', Ref, process, _, normal}, State) ->
+  true = demonitor(Ref),
+  {noreply, State};
 handle_info({'DOWN', Ref, process, _, Reason}, State) ->
   lager:error("metadata request failed, reason: ~p", [Reason]),
   true = demonitor(Ref),
