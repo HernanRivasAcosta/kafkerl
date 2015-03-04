@@ -28,8 +28,8 @@ build_fetch_request(Data, ClientId, CorrelationId, MaxWait, MinBytes) ->
 -spec build_metadata_request(topic() | [topic()], correlation_id(),
                              client_id()) -> iodata().
 build_metadata_request(Topics, CorrelationId, ClientId) ->
-  {Size, Request} = build_metadata_request(Topics),
-  [build_request_header(ClientId, ?METADATA_KEY, CorrelationId, Size), Request].
+  {_Size, Request} = build_metadata_request(Topics),
+  [build_request_header(ClientId, ?METADATA_KEY, CorrelationId), Request].
 
 % Message parsing
 -spec parse_produce_response(binary()) -> produce_response().
@@ -60,8 +60,7 @@ parse_fetch_response(Bin, {Remainder, CorrelationId, Steps}) ->
   parse_steps(NewBin, CorrelationId, Steps).
 
 -spec parse_metadata_response(binary()) -> metadata_response().
-parse_metadata_response(<<_Size:32/unsigned-integer,
-                          CorrelationId:32/unsigned-integer,
+parse_metadata_response(<<CorrelationId:32/unsigned-integer,
                           BrokerCount:32/unsigned-integer,
                           BrokersBin/binary>>) ->
   case parse_brokers(BrokerCount, BrokersBin) of
@@ -81,17 +80,22 @@ parse_metadata_response(_Other) ->
 %%==============================================================================
 %% Message Building
 %%==============================================================================
-build_request_header(ClientId, ApiKey, CorrelationId, RequestSize) ->
+build_request_header(ClientId, ApiKey, CorrelationId) ->
   % Build the header (http://goo.gl/5SNNTV)
   ApiVersion = 0, % Both the key and version should be 0, it's not a placeholder
   ClientIdSize = byte_size(ClientId),
-  % 10 is the size of the header
-  MessageSize = ClientIdSize + RequestSize + 10,
-  [<<MessageSize:32/unsigned-integer,
-     ApiKey:16/unsigned-integer,
+  [<<ApiKey:16/unsigned-integer,
      ApiVersion:16/unsigned-integer,
      CorrelationId:32/unsigned-integer,
      ClientIdSize:16/unsigned-integer>>,
+   ClientId].
+
+build_request_header(ClientId, ApiKey, CorrelationId, RequestSize) ->
+  ClientIdSize = byte_size(ClientId),
+  % 10 is the size of the header
+  MessageSize = ClientIdSize + RequestSize + 10,
+  [<<MessageSize:32/unsigned-integer>>,
+   build_request_header(ClientId, ApiKey, CorrelationId),
    ClientId].
 
 %% PRODUCE REQUEST
