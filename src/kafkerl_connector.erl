@@ -203,10 +203,6 @@ init([Config]) ->
                      autocreate_topics    = AutocreateTopics,
                      max_metadata_retries = MaxMetadataRetries,
                      metadata_request_cd  = MetadataRequestCooldown},
-      Request = metadata_request(State, Topics),
-      % Start requesting metadata
-      Params = [self(), Brokers, get_metadata_tcp_options(), MaxMetadataRetries,
-                RetryInterval, Request],
       {_Pid, _Ref} = make_metadata_request(State),
       {ok, State};
     {errors, Errors} ->

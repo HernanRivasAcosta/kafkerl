@@ -82,7 +82,7 @@ parse_metadata_response(_Other) ->
 %%==============================================================================
 build_request_header(ClientId, ApiKey, CorrelationId) ->
   % Build the header (http://goo.gl/5SNNTV)
-  ApiVersion = 0, % Both the key and version should be 0, it's not a placeholder
+  ApiVersion = 0, % The version should be 0, it's not a placeholder
   ClientIdSize = byte_size(ClientId),
   [<<ApiKey:16/unsigned-integer,
      ApiVersion:16/unsigned-integer,
@@ -91,12 +91,10 @@ build_request_header(ClientId, ApiKey, CorrelationId) ->
    ClientId].
 
 build_request_header(ClientId, ApiKey, CorrelationId, RequestSize) ->
-  ClientIdSize = byte_size(ClientId),
   % 10 is the size of the header
-  MessageSize = ClientIdSize + RequestSize + 10,
+  MessageSize = byte_size(ClientId) + RequestSize + 10,
   [<<MessageSize:32/unsigned-integer>>,
-   build_request_header(ClientId, ApiKey, CorrelationId),
-   ClientId].
+   build_request_header(ClientId, ApiKey, CorrelationId)].
 
 %% PRODUCE REQUEST
 build_produce_request([{Topic, Partition, Messages}], Compression) ->
