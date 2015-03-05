@@ -4,10 +4,10 @@
 -behaviour(gen_server).
 
 %% API
--export([send/3, request_metadata/1, request_metadata/2, subscribe/2,
-         subscribe/3, get_partitions/1, unsubscribe/2]).
+-export([send/3, request_metadata/1, request_metadata/2, request_metadata/3,
+         subscribe/2, subscribe/3, get_partitions/1, unsubscribe/2]).
 % Only for internal use
--export([request_metadata/6]).
+-export([do_request_metadata/6, make_metadata_request/1]).
 % Only for broker connections
 -export([produce_succeeded/2]).
 % Supervisors
@@ -85,9 +85,13 @@ unsubscribe(ServerRef, Callback) ->
 request_metadata(ServerRef) ->
   gen_server:call(ServerRef, {request_metadata}).
 
--spec request_metadata(server_ref(), [topic()]) -> ok.
-request_metadata(ServerRef, Topics) ->
-  gen_server:call(ServerRef, {request_metadata, Topics}).
+-spec request_metadata(server_ref(), [topic()] | boolean()) -> ok.
+request_metadata(ServerRef, TopicsOrForced) ->
+  gen_server:call(ServerRef, {request_metadata, TopicsOrForced}).
+
+-spec request_metadata(server_ref(), [topic()], boolean()) -> ok.
+request_metadata(ServerRef, Topics, Forced) ->
+  gen_server:call(ServerRef, {request_metadata, Topics, Forced}).
 
 -spec produce_succeeded(server_ref(),
                         [{topic(), partition(), [binary()], integer()}]) -> ok.
@@ -112,8 +116,12 @@ handle_call({send, Message}, _From, State) ->
   handle_send(Message, State);
 handle_call({request_metadata}, _From, State) ->
   {reply, ok, handle_request_metadata(State, [])};
+handle_call({request_metadata, Forced}, _From, State) when is_boolean(Forced) ->
+  {reply, ok, handle_request_metadata(State, [], true)};
 handle_call({request_metadata, Topics}, _From, State) ->
   {reply, ok, handle_request_metadata(State, Topics)};
+handle_call({request_metadata, Topics, Forced}, _From, State) ->
+  {reply, ok, handle_request_metadata(State, Topics, Forced)};
 handle_call({get_partitions}, _From, State) ->
   {reply, handle_get_partitions(State), State};
 handle_call({subscribe, Callback}, _From, State) ->
@@ -124,7 +132,8 @@ handle_call({subscribe, Callback}, _From, State) ->
       {reply, {error, invalid_callback}, State}
   end;
 handle_call({unsubscribe, Callback}, _From, State) ->
-  {reply, ok, State#state{callbacks = State#state.callbacks -- [Callback]}}.
+  NewCallbacks = lists:keydelete(Callback, 2, State#state.callbacks),
+  {reply, ok, State#state{callbacks = NewCallbacks}}.
 
 handle_info(metadata_timeout, State) ->
   {stop, {error, unable_to_retrieve_metadata}, State};
@@ -149,6 +158,13 @@ handle_info({metadata_updated, Mapping}, State) ->
   {noreply, State#state{broker_mapping = NewBrokerMapping, pending = [],
                         callbacks = NewCallbacks,
                         known_topics = NewKnownTopics}};
+handle_info({'DOWN', Ref, process, _, normal}, State) ->
+  true = demonitor(Ref),
+  {noreply, State};
+handle_info({'DOWN', Ref, process, _, Reason}, State) ->
+  lager:error("metadata request failed, reason: ~p", [Reason]),
+  true = demonitor(Ref),
+  {noreply, handle_request_metadata(State, [], true)};
 handle_info(Msg, State) ->
   lager:notice("Unexpected info message received: ~p on ~p", [Msg, State]),
   {noreply, State}.
@@ -187,11 +203,7 @@ init([Config]) ->
                      autocreate_topics    = AutocreateTopics,
                      max_metadata_retries = MaxMetadataRetries,
                      metadata_request_cd  = MetadataRequestCooldown},
-      Request = metadata_request(State, Topics),
-      % Start requesting metadata
-      Params = [self(), Brokers, get_metadata_tcp_options(), MaxMetadataRetries,
-                RetryInterval, Request],
-      _Pid = spawn_link(?MODULE, request_metadata, Params),
+      {_Pid, _Ref} = make_metadata_request(State),
       {ok, State};
     {errors, Errors} ->
       lists:foreach(fun(E) ->
@@ -241,25 +253,24 @@ handle_get_partitions(#state{broker_mapping = void}) ->
 handle_get_partitions(#state{broker_mapping = Mapping}) ->
   {ok, Mapping}.
 
+
+handle_request_metadata(State, Topics) ->
+  handle_request_metadata(State, Topics, false).
+
 % Ignore it if the topic mapping is void, we are already requesting the metadata
-handle_request_metadata(State = #state{broker_mapping = void}, _Topics) ->
+handle_request_metadata(State = #state{broker_mapping = void}, _, false) ->
   State;
-handle_request_metadata(State, NewTopics) ->
+handle_request_metadata(State, NewTopics, _) ->
   SortedNewTopics = lists:sort(NewTopics),
   NewKnownTopics = lists:umerge(State#state.known_topics, SortedNewTopics),
-  Request = metadata_request(State, NewKnownTopics),
-  Params = [self(), State#state.brokers, get_metadata_tcp_options(),
-            State#state.max_metadata_retries, State#state.retry_interval,
-            Request],
-  {A, B, C} = erlang:now(),
-  Now = (A * 1000000 + B) * 1000 + C div 1000,
+  Now = get_timestamp(),
   LastRequest = State#state.last_metadata_request,
   Cooldown = State#state.metadata_request_cd,
   _ = case Cooldown - (Now - LastRequest) of
-        Negative when Negative < 0 ->
-          _ = spawn_link(?MODULE, request_metadata, Params);
-        NonNegative ->
-          _ = timer:apply_after(NonNegative, ?MODULE, request_metadata, Params)
+        Negative when Negative =< 0 ->
+          _ = make_metadata_request(State);
+        Time ->
+          _ = timer:apply_after(Time, ?MODULE, request_metadata, [self(), true])
       end,
   State#state{broker_mapping = void, known_topics = NewKnownTopics,
               last_metadata_request = Now}.
@@ -280,12 +291,12 @@ get_ets_dump_name({OldName, Counter}) ->
   end.
 
 get_metadata_tcp_options() ->
-  kafkerl_utils:get_tcp_options([{active, false}]).
+  kafkerl_utils:get_tcp_options([{active, false}, {packet, 4}]).
 
-request_metadata(Pid, _Brokers, _TCPOpts, 0, _RetryInterval, _Request) ->
+do_request_metadata(Pid, _Brokers, _TCPOpts, 0, _RetryInterval, _Request) ->
   Pid ! metadata_timeout;
-request_metadata(Pid, Brokers, TCPOpts, Retries, RetryInterval, Request) ->
-  case request_metadata(Brokers, TCPOpts, Request) of
+do_request_metadata(Pid, Brokers, TCPOpts, Retries, RetryInterval, Request) ->
+  case do_request_metadata(Brokers, TCPOpts, Request) of
     {ok, TopicMapping} ->
       Pid ! {metadata_updated, TopicMapping};
     _Error ->
@@ -294,41 +305,41 @@ request_metadata(Pid, Brokers, TCPOpts, Retries, RetryInterval, Request) ->
                      -1 -> -1;
                      N  -> N - 1
                    end,
-      request_metadata(Pid, Brokers, TCPOpts, NewRetries, RetryInterval,
+      do_request_metadata(Pid, Brokers, TCPOpts, NewRetries, RetryInterval,
                        Request)
   end.
 
-request_metadata([], _TCPOpts, _Request) ->
+do_request_metadata([], _TCPOpts, _Request) ->
   {error, all_down};
-request_metadata([{Host, Port} = _Broker | T] = _Brokers, TCPOpts, Request) ->
+do_request_metadata([{Host, Port} = _Broker | T] = _Brokers, TCPOpts, Request) ->
   lager:debug("Attempting to connect to broker at ~s:~p", [Host, Port]),
   % Connect to the Broker
   case gen_tcp:connect(Host, Port, TCPOpts) of
     {error, Reason} ->
       warn_metadata_request(Host, Port, Reason),
       % Failed, try with the next one in the list
-      request_metadata(T, TCPOpts, Request);
+      do_request_metadata(T, TCPOpts, Request);
     {ok, Socket} ->
       % On success, send the metadata request
       case gen_tcp:send(Socket, Request) of
         {error, Reason} ->
           warn_metadata_request(Host, Port, Reason),
           % Unable to send request, try the next broker
-          request_metadata(T, TCPOpts, Request);
+          do_request_metadata(T, TCPOpts, Request);
         ok ->
           case gen_tcp:recv(Socket, 0, 6000) of
             {error, Reason} ->
               warn_metadata_request(Host, Port, Reason),
               gen_tcp:close(Socket),
               % Nothing received (probably a timeout), try the next broker
-              request_metadata(T, TCPOpts, Request);
+              do_request_metadata(T, TCPOpts, Request);
             {ok, Data} ->
               gen_tcp:close(Socket),
               case kafkerl_protocol:parse_metadata_response(Data) of
                 {error, Reason} ->
                   warn_metadata_request(Host, Port, Reason),
                   % The parsing failed, try the next broker
-                  request_metadata(T, TCPOpts, Request);
+                  do_request_metadata(T, TCPOpts, Request);
                 {ok, _CorrelationId, Metadata} ->
                   % We received a metadata response, make sure it has brokers
                   {ok, get_topic_mapping(Metadata)}
@@ -457,6 +468,20 @@ send_mapping_to(_NewCallback, #state{broker_mapping = void}) ->
 send_mapping_to(NewCallback, #state{broker_mapping = Mapping}) ->
   Partitions = get_partitions_from_mapping(Mapping),
   send_event({partition_update, Partitions}, NewCallback).
+
+make_metadata_request(State = #state{brokers = Brokers,
+                                     known_topics = Topics,
+                                     max_metadata_retries = MaxMetadataRetries,
+                                     retry_interval = RetryInterval}) ->
+  Request = metadata_request(State, Topics),
+  % Start requesting metadata
+  Params = [self(), Brokers, get_metadata_tcp_options(), MaxMetadataRetries,
+            RetryInterval, Request],
+  spawn_monitor(?MODULE, do_request_metadata, Params).
+
+get_timestamp() ->
+  {A, B, C} = erlang:now(),
+  (A * 1000000 + B) * 1000 + C div 1000.
 
 %%==============================================================================
 %% Error handling
