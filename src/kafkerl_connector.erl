@@ -266,14 +266,16 @@ handle_request_metadata(State, NewTopics, _) ->
   Now = get_timestamp(),
   LastRequest = State#state.last_metadata_request,
   Cooldown = State#state.metadata_request_cd,
-  _ = case Cooldown - (Now - LastRequest) of
+  LastMetadataUpdate = case Cooldown - (Now - LastRequest) of
         Negative when Negative =< 0 ->
-          _ = make_metadata_request(State);
+          _ = make_metadata_request(State),
+          Now;
         Time ->
-          _ = timer:apply_after(Time, ?MODULE, request_metadata, [self(), true])
+          _ = timer:apply_after(Time, ?MODULE, request_metadata, [self(), true]),
+          LastRequest
       end,
   State#state{broker_mapping = void, known_topics = NewKnownTopics,
-              last_metadata_request = Now}.
+              last_metadata_request = LastMetadataUpdate}.
 
 %%==============================================================================
 %% Utils
