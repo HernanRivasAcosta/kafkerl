@@ -70,8 +70,8 @@ handle_call({clear_buffers}, _From, State) ->
   {reply, ok, State#state{buffers = []}}.
 
 -spec handle_info(any(), state()) -> {noreply, state()}.
-handle_info({connected, Socket}, State) ->
-  handle_flush(State#state{socket = Socket});
+handle_info({connected, Socket}, State = #state{max_time_queued = QueueTime}) ->
+  handle_flush(QueueTime, State#state{socket = Socket});
 handle_info(connection_timeout, State) ->
   {stop, {error, unable_to_connect}, State};
 handle_info({tcp_closed, _Socket}, State = #state{name = Name,
@@ -85,8 +85,7 @@ handle_info({tcp, _Socket, Bin}, State) ->
     {error, Reason} -> {stop, {error, Reason}, State}
   end;
 handle_info({flush, Time}, State) ->
-  {ok, _Tref} = queue_flush(Time),
-  handle_flush(State);
+  handle_flush(Time, State);
 handle_info(Msg, State = #state{name = Name}) ->
   lager:notice("~p received unexpected info message: ~p on ~p", [Name, Msg]),
   {noreply, State}.
@@ -120,7 +119,6 @@ init([Id, Connector, Address, Config, Name]) ->
                      max_time_queued = MaxTimeQueued, ets = EtsName},
       Params = [self(), Name, NewTCPOpts, Address, RetryInterval, MaxRetries],
       _Pid = spawn_link(?MODULE, connect, Params),
-      {ok, _Tref} = queue_flush(MaxTimeQueued),
       {ok, State};
     {errors, Errors} ->
       lists:foreach(fun(E) ->
@@ -129,16 +127,26 @@ init([Id, Connector, Address, Config, Name]) ->
       {stop, bad_config}
   end.
 
-handle_flush(State = #state{socket = undefined}) ->
+handle_flush(Time, State = #state{socket = undefined}) ->
+  {ok, _Tref} = queue_flush(Time),
   {noreply, State};
-handle_flush(State = #state{buffers = []}) ->
+handle_flush(Time, State = #state{buffers = []}) ->
+  {ok, _Tref} = queue_flush(Time),
   {noreply, State};
-handle_flush(State = #state{socket = Socket, ets = EtsName, buffers = Buffers,
-                            client_id = ClientId, connector = Connector,
-                            name = Name}) ->
+handle_flush(Time, State = #state{socket = Socket, ets = EtsName, name = Name,
+                                  buffers = Buffers, client_id = ClientId,
+                                  connector = Connector}) ->
   {ok, CorrelationId, NewState} = build_correlation_id(State),
   % TODO: Maybe buffer all this messages in case something goes wrong
-  AllMessages = get_all_messages(Buffers),
+  {AllMessages, MessagesPending} = get_all_messages(Buffers),
+
+  % If there are any messages pending a flush, flush immediately. Otherwise, the 
+  % timeout is fine
+  case MessagesPending of
+    true  -> self() ! {flush, Time};
+    false -> {ok, _Tref} = queue_flush(Time)
+  end,
+
   case kafkerl_utils:merge_messages(AllMessages) of
     [] ->
       {noreply, NewState};
@@ -312,20 +320,22 @@ queue_flush(Time) ->
   timer:send_after(Time * 1000, {flush, Time}).
 
 get_all_messages(Buffers) ->
-  get_all_messages(Buffers, []).
+  get_all_messages(Buffers, {[], false}).
 
 get_all_messages([], Acc) ->
   Acc;
-get_all_messages([H | T], Acc) ->
-  get_all_messages(T, Acc ++ get_messages_from(H, 20)).
+get_all_messages([H | T], {Acc, HasPending}) ->
+  {Messages, NewHasPending} = get_messages_from(H, 20),
+  get_all_messages(T, {Acc ++ Messages, HasPending orelse NewHasPending}).
 
 get_messages_from(Ets, Retries) ->
-  case ets_buffer:read_all(Ets) of
+  MaxMessages = 500,
+  case ets_buffer:read(Ets, MaxMessages) of
     L when is_list(L) ->
-      L;
+      {L, length(L) =:= MaxMessages};
     _Error when Retries > 0 ->
       get_messages_from(Ets, Retries - 1);
     _Error ->
       lager:warning("giving up on reading from the ETS buffer"),
-      []
+      {[], false}
   end.

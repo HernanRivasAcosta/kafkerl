@@ -23,6 +23,10 @@ done
 # make sure the path is defined
 if [ ! -d "${d}" ]; then echo "invalid kafka path ${d}" ; exit 1 ; fi
 
+"${d}/bin/kafka-topics.sh" --zookeeper localhost:2181 --create --topic test0 --partitions 3 --replication-factor 3
 "${d}/bin/kafka-topics.sh" --zookeeper localhost:2181 --create --topic test1 --partitions 3 --replication-factor 3
-"${d}/bin/kafka-topics.sh" --zookeeper localhost:2181 --create --topic test2 --partitions 3 --replication-factor 3
-"${d}/bin/kafka-topics.sh" --zookeeper localhost:2181 --create --topic test3 --partitions 4 --replication-factor 3
+"${d}/bin/kafka-topics.sh" --zookeeper localhost:2181 --create --topic test2 --partitions 4 --replication-factor 3
+
+"${d}/bin/kafka-topics.sh" --zookeeper localhost:2181 --create --topic stress_test0 --partitions 3 --replication-factor 3
+"${d}/bin/kafka-topics.sh" --zookeeper localhost:2181 --create --topic stress_test1 --partitions 3 --replication-factor 3
+"${d}/bin/kafka-topics.sh" --zookeeper localhost:2181 --create --topic stress_test2 --partitions 3 --replication-factor 3
