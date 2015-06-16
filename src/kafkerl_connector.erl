@@ -427,7 +427,7 @@ get_broker_mapping([], _State, _N, Acc) ->
 get_broker_mapping([{{Topic, Partition, ConnId}, Address} | T],
                    State = #state{config = Config}, N, Acc) ->
   Buffer = kafkerl_utils:buffer_name(Topic, Partition),
-  _ = ets_buffer:create(Buffer, fifo),
+  ets_buffer = ets_buffer:create(Buffer, fifo),
   {Conn, NewN} = case lists:keyfind(ConnId, 1, Acc) of
                    false ->
                      {start_broker_connection(N, Address, Config), N + 1};
