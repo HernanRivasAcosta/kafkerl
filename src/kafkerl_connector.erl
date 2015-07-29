@@ -4,8 +4,15 @@
 -behaviour(gen_server).
 
 %% API
--export([send/3, request_metadata/1, request_metadata/2, request_metadata/3,
-         subscribe/2, subscribe/3, get_partitions/1, unsubscribe/2]).
+% Metadata
+-export([request_metadata/1, request_metadata/2, request_metadata/3,
+         get_partitions/1]).
+% Produce
+-export([send/3]).
+% Consume
+-export([fetch/4]).
+% Common
+-export([subscribe/2, subscribe/3, unsubscribe/2]).
 % Only for internal use
 -export([do_request_metadata/6, make_metadata_request/1]).
 % Only for broker connections
@@ -19,9 +26,8 @@
 -include("kafkerl.hrl").
 -include("kafkerl_consumers.hrl").
 
--type server_ref()          :: atom() | pid().
 -type broker_mapping_key()  :: {topic(), partition()}.
--type broker_mapping()      :: {broker_mapping_key(), server_ref()}.
+-type broker_mapping()      :: {broker_mapping_key(), kafkerl:server_ref()}.
 
 -record(state, {brokers                 = [] :: [socket_address()],
                 broker_mapping        = void :: [broker_mapping()] | void,
@@ -35,7 +41,8 @@
                 pending                 = [] :: [basic_message()],
                 last_metadata_request    = 0 :: integer(),
                 metadata_request_cd      = 0 :: integer(),
-                last_dump_name     = {"", 0} :: {string(), integer()}}).
+                last_dump_name     = {"", 0} :: {string(), integer()},
+                default_fetch_options   = [] :: kafkerl:options()}).
 -type state() :: #state{}.
 
 %%==============================================================================
@@ -45,7 +52,7 @@
 start_link(Name, Config) ->
   gen_server:start_link({local, Name}, ?MODULE, [Config], []).
 
--spec send(server_ref(), basic_message(), kafkerl:produce_option()) ->
+-spec send(kafkerl:server_ref(), basic_message(), kafkerl:options()) ->
   ok | error().
 send(ServerRef, {Topic, Partition, _Payload} = Message, Options) ->
   Buffer = kafkerl_utils:buffer_name(Topic, Partition),
@@ -62,7 +69,13 @@ send(ServerRef, {Topic, Partition, _Payload} = Message, Options) ->
       gen_server:call(ServerRef, {send, Message})
   end.
 
--spec get_partitions(server_ref()) -> [{topic(), [partition()]}] | error().
+-spec fetch(kafkerl:server_ref(), topic(), partition(), kafkerl:options()) ->
+  ok.
+fetch(ServerRef, Topic, Partition, Options) ->
+  gen_server:call(ServerRef, {fetch, Topic, Partition, Options}).
+
+-spec get_partitions(kafkerl:server_ref()) ->
+  [{topic(), [partition()]}] | error().
 get_partitions(ServerRef) ->
   case gen_server:call(ServerRef, {get_partitions}) of
     {ok, Mapping} ->
@@ -71,29 +84,29 @@ get_partitions(ServerRef) ->
       Error
   end.
 
--spec subscribe(server_ref(), callback()) -> ok | error().
+-spec subscribe(kafkerl:server_ref(), callback()) -> ok | error().
 subscribe(ServerRef, Callback) ->
   subscribe(ServerRef, Callback, all).
--spec subscribe(server_ref(), callback(), filters()) -> ok | error().
+-spec subscribe(kafkerl:server_ref(), callback(), filters()) -> ok | error().
 subscribe(ServerRef, Callback, Filter) ->
   gen_server:call(ServerRef, {subscribe, {Filter, Callback}}).
--spec unsubscribe(server_ref(), callback()) -> ok.
+-spec unsubscribe(kafkerl:server_ref(), callback()) -> ok.
 unsubscribe(ServerRef, Callback) ->
   gen_server:call(ServerRef, {unsubscribe, Callback}).
 
--spec request_metadata(server_ref()) -> ok.
+-spec request_metadata(kafkerl:server_ref()) -> ok.
 request_metadata(ServerRef) ->
   gen_server:call(ServerRef, {request_metadata}).
 
--spec request_metadata(server_ref(), [topic()] | boolean()) -> ok.
+-spec request_metadata(kafkerl:server_ref(), [topic()] | boolean()) -> ok.
 request_metadata(ServerRef, TopicsOrForced) ->
   gen_server:call(ServerRef, {request_metadata, TopicsOrForced}).
 
--spec request_metadata(server_ref(), [topic()], boolean()) -> ok.
+-spec request_metadata(kafkerl:server_ref(), [topic()], boolean()) -> ok.
 request_metadata(ServerRef, Topics, Forced) ->
   gen_server:call(ServerRef, {request_metadata, Topics, Forced}).
 
--spec produce_succeeded(server_ref(),
+-spec produce_succeeded(kafkerl:server_ref(),
                         [{topic(), partition(), [binary()], integer()}]) -> ok.
 produce_succeeded(ServerRef, Messages) ->
   gen_server:cast(ServerRef, {produce_succeeded, Messages}).
@@ -114,6 +127,8 @@ handle_call({dump_buffer_to_disk, Buffer, Options}, _From, State) ->
   {reply, ok, State#state{last_dump_name = DumpName}};
 handle_call({send, Message}, _From, State) ->
   handle_send(Message, State);
+handle_call({fetch, Topic, Partition, Options}, _From, State) ->
+  {reply, handle_fetch(Topic, Partition, Options, State), State};
 handle_call({request_metadata}, _From, State) ->
   {reply, ok, handle_request_metadata(State, [])};
 handle_call({request_metadata, Forced}, _From, State) when is_boolean(Forced) ->
@@ -191,18 +206,22 @@ init([Config]) ->
             {topics, [binary], required},
             {metadata_tcp_timeout, positive_integer, {default, 1500}},
             {assume_autocreate_topics, boolean, {default, false}},
-            {metadata_request_cooldown, positive_integer, {default, 333}}],
+            {metadata_request_cooldown, positive_integer, {default, 333}},
+            {consumer_min_bytes, positive_integer, {default, 1}},
+            {consumer_max_wait, positive_integer, {default, 1500}}],
   case normalizerl:normalize_proplist(Schema, Config) of
     {ok, [Brokers, MaxMetadataRetries, ClientId, Topics, RetryInterval,
-          AutocreateTopics, MetadataRequestCooldown]} ->
-      State = #state{config               = Config,
-                     known_topics         = Topics,
-                     brokers              = Brokers,
-                     client_id            = ClientId,
-                     retry_interval       = RetryInterval,
-                     autocreate_topics    = AutocreateTopics,
-                     max_metadata_retries = MaxMetadataRetries,
-                     metadata_request_cd  = MetadataRequestCooldown},
+          AutocreateTopics, MetadataRequestCooldown, MinBytes, MaxWait]} ->
+      DefaultFetchOptions = [{min_bytes, MinBytes}, {max_wait, MaxWait}],
+      State = #state{config                = Config,
+                     known_topics          = Topics,
+                     brokers               = Brokers,
+                     client_id             = ClientId,
+                     retry_interval        = RetryInterval,
+                     autocreate_topics     = AutocreateTopics,
+                     max_metadata_retries  = MaxMetadataRetries,
+                     metadata_request_cd   = MetadataRequestCooldown,
+                     default_fetch_options = DefaultFetchOptions},
       {_Pid, _Ref} = make_metadata_request(State),
       {ok, State};
     {errors, Errors} ->
@@ -248,11 +267,21 @@ handle_send(Message, State = #state{broker_mapping = Mapping, pending = Pending,
       end
   end.
 
+handle_fetch(_Topic, _Partition, _Options, #state{broker_mapping = void}) ->
+  {error, not_connected};
+handle_fetch(Topic, Partition, Options, State) ->
+  case lists:keyfind({Topic, Partition}, 1, State#state.broker_mapping) of
+    false ->
+      {error, {no_broker, {Topic, Partition}}};
+    {_, Broker} ->
+      NewOptions = Options ++ State#state.default_fetch_options,
+      kafkerl_broker_connection:fetch(Broker, Topic, Partition, NewOptions)
+  end.
+
 handle_get_partitions(#state{broker_mapping = void}) ->
   {error, not_available};
 handle_get_partitions(#state{broker_mapping = Mapping}) ->
   {ok, Mapping}.
-
 
 handle_request_metadata(State, Topics) ->
   handle_request_metadata(State, Topics, false).
@@ -311,7 +340,7 @@ do_request_metadata(Pid, Brokers, TCPOpts, Retries, RetryInterval, Request) ->
 
 do_request_metadata([], _TCPOpts, _Request) ->
   {error, all_down};
-do_request_metadata([{Host, Port} = _Broker | T] = _Brokers, TCPOpts, Request) ->
+do_request_metadata([{Host, Port} = _Broker | T], TCPOpts, Request) ->
   lager:debug("Attempting to connect to broker at ~s:~p", [Host, Port]),
   % Connect to the Broker
   case gen_tcp:connect(Host, Port, TCPOpts) of
