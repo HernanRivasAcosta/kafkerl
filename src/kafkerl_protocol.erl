@@ -4,7 +4,8 @@
 -export([build_produce_request/4, build_fetch_request/5,
          build_metadata_request/3]).
 
--export([parse_produce_response/1, parse_fetch_response/1,
+-export([parse_correlation_id/1,
+         parse_produce_response/1, parse_fetch_response/1,
          parse_fetch_response/2, parse_metadata_response/1]).
 
 -include("kafkerl.hrl").
@@ -32,6 +33,12 @@ build_metadata_request(Topics, CorrelationId, ClientId) ->
   [build_request_header(ClientId, ?METADATA_KEY, CorrelationId), Request].
 
 % Message parsing
+-spec parse_correlation_id(binary()) -> {ok, integer(), binary()}.
+parse_correlation_id(<<_Size:32/unsigned-integer,
+                       CorrelationId:32/unsigned-integer,
+                       Remainder/binary>>) ->
+  {ok, CorrelationId, Remainder}.
+
 -spec parse_produce_response(binary()) -> produce_response().
 parse_produce_response(<<_Size:32/unsigned-integer,
                          CorrelationId:32/unsigned-integer,
@@ -49,12 +56,16 @@ parse_fetch_response(<<_Size:32/unsigned-integer,
     {ok, Topics} ->
       {ok, CorrelationId, Topics};
     {incomplete, Topics, {Bin, Steps}} ->
-      {incomplete, CorrelationId, Topics, {Bin, CorrelationId, Steps}}
+      {incomplete, CorrelationId, Topics, {Bin, CorrelationId, Steps}};
+    {error, _Reason} = Error ->
+      Error
   end;
 parse_fetch_response(_Other) ->
   {error, unexpected_binary}.
 
 -spec parse_fetch_response(binary(), fetch_state()) -> fetch_response().
+parse_fetch_response(Bin, void) ->
+  parse_fetch_response(Bin);
 parse_fetch_response(Bin, {Remainder, CorrelationId, Steps}) ->
   NewBin = <<Remainder/binary, Bin/binary>>,
   parse_steps(NewBin, CorrelationId, Steps).
@@ -68,10 +79,10 @@ parse_metadata_response(<<CorrelationId:32/unsigned-integer,
       case parse_topic_metadata(TopicCount, TopicsBin) of
         {ok, Metadata} ->
           {ok, CorrelationId, {Brokers, Metadata}};
-        Error ->
+        {error, _Reason} = Error ->
           Error
       end;
-    Error ->
+    {error, _Reason} = Error ->
       Error
   end;
 parse_metadata_response(_Other) ->
@@ -361,7 +372,9 @@ parse_topics(Count, Bin, Acc) ->
       Step = {topics, Count},
       {incomplete, lists:reverse(Acc, [Topic]), {Remainder, Steps ++ [Step]}};
     incomplete ->
-      {incomplete, lists:reverse(Acc), {Bin, [{topics, Count}]}}
+      {incomplete, lists:reverse(Acc), {Bin, [{topics, Count}]}};
+    {error, _Reason} = Error ->
+      Error
   end.
 
 parse_topic(<<TopicNameLength:16/unsigned-integer,
@@ -373,7 +386,9 @@ parse_topic(<<TopicNameLength:16/unsigned-integer,
       {ok, {TopicName, Partitions}, Remainder};
     {incomplete, Partitions, {Bin, Steps}} ->
       Step = {topic, TopicName},
-      {incomplete, {TopicName, Partitions}, {Bin, Steps ++ [Step]}}
+      {incomplete, {TopicName, Partitions}, {Bin, Steps ++ [Step]}};
+    {error, _Reason} = Error ->
+      Error
   end;
 parse_topic(_Bin) ->
   incomplete.
@@ -393,7 +408,9 @@ parse_partitions(Count, Bin, Acc) ->
       {incomplete, lists:reverse(Acc, [Partition]), NewState};
     incomplete ->
       Step = {partitions, Count},
-      {incomplete, lists:reverse(Acc), {Bin, [Step]}}
+      {incomplete, lists:reverse(Acc), {Bin, [Step]}};
+    {error, _Reason} = Error ->
+      Error
   end.
 
 parse_partition(<<PartitionId:32/unsigned-integer,
@@ -444,7 +461,7 @@ parse_message(<<_Offset:64/unsigned-integer,
          % 4294967295 is -1 and it signifies an empty Key http://goo.gl/Ssl4wq
          <<4294967295:32/unsigned-integer,
            ValueSize:32/unsigned-integer, Value:ValueSize/binary>> ->
-             {no_key, Value}
+             Value
        end,
   % 12 is the size of the offset plus the size of the MessageSize int
   {ok, {KV, MessageSize + 12}, Remainder};

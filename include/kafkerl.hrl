@@ -57,8 +57,9 @@
 -type produce_response()  :: {ok, correlation_id(), [produce_topic()]}.
 
 %% Fetch responses
--type messages()       :: [{topic(), [{{partition(), integer()}, [binary()]}]}].
--type fetch_state()    :: {binary(), integer(), [any()]}.
+-type messages()       :: [{topic(), [{{partition(), integer()},
+                                       [binary() | {binary(), binary()}]}]}].
+-type fetch_state()    :: {binary(), integer(), [any()]} | void.
 -type fetch_response() :: {ok, integer(), messages()} |
                           {incomplete, integer(), messages(), fetch_state()} |
                           error().

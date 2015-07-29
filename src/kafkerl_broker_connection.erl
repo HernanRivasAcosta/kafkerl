@@ -4,7 +4,7 @@
 -behaviour(gen_server).
 
 %% API
--export([add_buffer/2, clear_buffers/1]).
+-export([add_buffer/2, clear_buffers/1, fetch/4]).
 % Only for internal use
 -export([connect/6]).
 % Supervisors
@@ -14,6 +14,7 @@
          handle_call/3, handle_cast/2, handle_info/2]).
 
 -include("kafkerl.hrl").
+-include("kafkerl_consumers.hrl").
 
 -type server_ref()          :: atom() | pid().
 -type conn_idx()            :: 0..1023.
@@ -33,7 +34,11 @@
                 request_number    = 0 :: integer(),
                 pending_requests = [] :: [integer()],
                 max_time_queued   = 0 :: integer(),
-                ets       = undefined :: atom()}).
+                ets       = undefined :: atom(),
+                fetching       = void :: integer() | void,
+                fetches          = [] :: [{correlation_id(),
+                                           callback(),
+                                           fetch_state()}]}).
 -type state() :: #state{}.
 
 %%==============================================================================
@@ -60,6 +65,10 @@ add_buffer(ServerRef, Buffer) ->
 clear_buffers(ServerRef) ->
   gen_server:call(ServerRef, {clear_buffers}).
 
+-spec fetch(server_ref(), topic(), partition(), kafkerl:options()) -> ok.
+fetch(ServerRef, Topic, Partition, Options) ->
+  gen_server:call(ServerRef, {fetch, Topic, Partition, Options}).
+
 %%==============================================================================
 %% gen_server callbacks
 %%==============================================================================
@@ -67,7 +76,9 @@ clear_buffers(ServerRef) ->
 handle_call({add_buffer, Buffer}, _From, State = #state{buffers = Buffers}) ->
   {reply, ok, State#state{buffers = [Buffer| Buffers]}};
 handle_call({clear_buffers}, _From, State) ->
-  {reply, ok, State#state{buffers = []}}.
+  {reply, ok, State#state{buffers = []}};
+handle_call({fetch, Topic, Partition, Options}, _From, State) ->
+  handle_fetch(Topic, Partition, Options, State).
 
 -spec handle_info(any(), state()) -> {noreply, state()}.
 handle_info({connected, Socket}, State) ->
@@ -163,6 +174,30 @@ handle_flush(State = #state{socket = Socket, ets = EtsName, buffers = Buffers,
       end
   end.
 
+handle_fetch(Topic, Partition, Options, State = #state{client_id = ClientId,
+                                                       socket = Socket,
+                                                       name = Name}) ->
+  Offset = proplists:get_value(offset, Options, 0),
+  MaxWait = proplists:get_value(max_wait, Options),
+  MinBytes = proplists:get_value(min_bytes, Options),
+  {ok, CorrelationId, NewState} = build_fetch_correlation_id(Options, State),
+  Request = {Topic, {Partition, Offset, 2147483647}},
+  Payload = kafkerl_protocol:build_fetch_request(Request,
+                                                 ClientId,
+                                                 CorrelationId,
+                                                 MaxWait,
+                                                 MinBytes),
+  case gen_tcp:send(Socket, Payload) of
+    {error, Reason} ->
+      lager:critical("~p was unable to write to socket, reason: ~p",
+                     [Name, Reason]),
+      gen_tcp:close(Socket),
+      {reply, {error, no_connection}, handle_tcp_close(NewState)};
+    ok ->
+      lager:debug("~p sent request ~p", [Name, CorrelationId]),
+      {reply, ok, NewState}
+  end.
+
 % TCP Handlers
 handle_tcp_close(State = #state{retry_interval = RetryInterval,
                                 tcp_options = TCPOpts,
@@ -173,8 +208,39 @@ handle_tcp_close(State = #state{retry_interval = RetryInterval,
   _Pid = spawn_link(?MODULE, connect, Params),
   State#state{socket = undefined}.
 
-handle_tcp_data(Bin, State = #state{connector = Connector, ets = EtsName,
-                                    name = Name}) ->
+handle_tcp_data(Bin, State = #state{fetches = Fetches}) ->
+  {ok, CorrelationId, _NewBin} = parse_correlation_id(Bin, State),
+  case lists:keytake(CorrelationId, 1, Fetches) of
+    {value, {CorrelationId, Consumer, FetchState}, NewFetches} ->
+      NewState = State#state{fetches = NewFetches},
+      handle_fetch_response(Bin, Consumer, FetchState, NewState);
+    false ->
+      handle_produce_response(Bin, State)
+  end.
+
+handle_fetch_response(Bin, Consumer, FetchState, State) ->
+  case kafkerl_protocol:parse_fetch_response(Bin, FetchState) of
+    {ok, _CorrelationId, [{_, [{{_, MessagesInPartition}, Messages}]}]} ->
+      send_messages(Consumer, {message_count, MessagesInPartition}, true),
+      send_messages(Consumer, {consume_done, Messages}, true),
+      {ok, State#state{fetching = void}};
+    {incomplete, CorrelationId, Topics, NewFetchState} ->
+      _ = case Topics of
+            [{_, [{_, Messages}]}] ->
+              send_messages(Consumer, {consumed, Messages}, false);
+            _ ->
+              ignore
+          end,
+      Fetches = State#state.fetches,
+      NewFetches = [{CorrelationId, Consumer, NewFetchState} | Fetches],
+      {ok, State#state{fetches = NewFetches, fetching = CorrelationId}};
+    Error ->
+      kafkerl_utils:send_event(Consumer, Error),
+      {ok, State#state{fetching = void}}
+  end.
+
+handle_produce_response(Bin, State = #state{connector = Connector, name = Name,
+                                            ets = EtsName}) ->
   case kafkerl_protocol:parse_produce_response(Bin) of
     {ok, CorrelationId, Topics} ->
       case ets:lookup(EtsName, CorrelationId) of
@@ -237,6 +303,12 @@ build_correlation_id(State = #state{request_number = RequestNumber,
   CorrelationId = (ConnIdx bsl 22) bor NextRequest,
   {ok, CorrelationId, State#state{request_number = NextRequest}}.
 
+build_fetch_correlation_id(Options, State = #state{fetches = Fetches}) ->
+  Consumer = proplists:get_value(consumer, Options),
+  {ok, CorrelationId, NewState} = build_correlation_id(State),
+  NewFetches = [{CorrelationId, Consumer, void} | Fetches],
+  {ok, CorrelationId, NewState#state{fetches = NewFetches}}.
+
 % TODO: Refactor this function, it is not sufficiently clear what it does
 separate_errors(Topics) ->
   separate_errors(Topics, {[], []}).
@@ -262,8 +334,8 @@ handle_errors(Errors, Messages, Name) ->
 
 handle_error({Topic, Partition, Error}, Messages, Name)
   when Error =:= ?UNKNOWN_TOPIC_OR_PARTITION orelse
-       Error =:= ?LEADER_NOT_AVAILABLE orelse
-       Error =:= ?NOT_LEADER_FOR_PARTITION ->
+       Error =:= ?NOT_LEADER_FOR_PARTITION orelse
+       Error =:= ?LEADER_NOT_AVAILABLE ->
   case get_message_for_error(Topic, Partition, Messages, Name) of
     undefined -> false;
     Message   -> {true, Message}
@@ -329,3 +401,13 @@ get_messages_from(Ets, Retries) ->
       lager:warning("giving up on reading from the ETS buffer"),
       []
   end.
+
+parse_correlation_id(Bin, #state{fetching = void}) ->
+  {ok, _CorrelationId, _NewBin} = kafkerl_protocol:parse_correlation_id(Bin);
+parse_correlation_id(Bin, #state{fetching = CorrelationId}) ->
+  {ok, CorrelationId, Bin}.
+
+send_messages(_Consumer, {_EventType, []}, false = _SendEmptyMessages) ->
+  ok;
+send_messages(Consumer, Event, _SendEmptyMessages) ->
+  kafkerl_utils:send_event(Consumer, Event).
