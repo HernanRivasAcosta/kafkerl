@@ -5,6 +5,7 @@
 -export([get_tcp_options/1]).
 -export([merge_messages/1, split_messages/1, valid_message/1]).
 -export([buffer_name/2]).
+-export([gather_consume_responses/0, gather_consume_responses/1]).
 
 -include("kafkerl.hrl").
 -include("kafkerl_consumers.hrl").
@@ -129,3 +130,22 @@ is_partition({Partition, Messages}) ->
   (is_binary(Messages) orelse is_list_of_binaries(Messages));
 is_partition(_Any) ->
   false.
+
+gather_consume_responses() ->
+  gather_consume_responses(2500).
+gather_consume_responses(Timeout) ->
+  gather_consume_responses(Timeout, []).
+gather_consume_responses(Timeout, Acc) ->
+  receive
+    {message_count, _} ->
+      % Ignore this one
+      gather_consume_responses(Acc);
+    {consumed, Messages} ->
+      gather_consume_responses(Acc ++ Messages);
+    {consume_done, Messages} ->
+      Acc ++ Messages;
+    {error, _Reason} = Error ->
+      Error
+  after Timeout ->
+    {error, {no_response, Acc}}
+  end.
