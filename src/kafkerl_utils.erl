@@ -139,9 +139,9 @@ gather_consume_responses(Timeout, Acc) ->
   receive
     {message_count, _} ->
       % Ignore this one
-      gather_consume_responses(Acc);
+      gather_consume_responses(Timeout, Acc);
     {consumed, Messages} ->
-      gather_consume_responses(Acc ++ Messages);
+      gather_consume_responses(Timeout, Acc ++ Messages);
     {consume_done, Messages} ->
       Acc ++ Messages;
     {error, _Reason} = Error ->
