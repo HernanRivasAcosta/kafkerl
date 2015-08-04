@@ -221,13 +221,13 @@ handle_tcp_data(Bin, State = #state{fetches = Fetches}) ->
 handle_fetch_response(Bin, Consumer, FetchState, State) ->
   case kafkerl_protocol:parse_fetch_response(Bin, FetchState) of
     {ok, _CorrelationId, [{_, [{{_, MessagesInPartition}, Messages}]}]} ->
-      send_messages(Consumer, {message_count, MessagesInPartition}, true),
-      send_messages(Consumer, {consume_done, Messages}, true),
+      send_messages(Consumer, {message_count, MessagesInPartition}),
+      send_messages(Consumer, {consume_done, Messages}),
       {ok, State#state{fetching = void}};
     {incomplete, CorrelationId, Topics, NewFetchState} ->
       _ = case Topics of
-            [{_, [{_, Messages}]}] ->
-              send_messages(Consumer, {consumed, Messages}, false);
+            [{_, [{_, [_ | _] = Messages}]}] ->
+              send_messages(Consumer, {consumed, Messages});
             _ ->
               ignore
           end,
@@ -407,7 +407,5 @@ parse_correlation_id(Bin, #state{fetching = void}) ->
 parse_correlation_id(Bin, #state{fetching = CorrelationId}) ->
   {ok, CorrelationId, Bin}.
 
-send_messages(_Consumer, {_EventType, []}, false = _SendEmptyMessages) ->
-  ok;
-send_messages(Consumer, Event, _SendEmptyMessages) ->
+send_messages(Consumer, Event) ->
   kafkerl_utils:send_event(Consumer, Event).
