@@ -3,25 +3,35 @@
 
 -export([start/0, start/2]).
 -export([produce/3, produce/4, produce/5,
-         consume/2, consume/3, consume/4,
+         consume/2, consume/3, consume/4, stop_consuming/2, stop_consuming/3,
          request_metadata/0, request_metadata/1, request_metadata/2,
          partitions/0, partitions/1]).
 -export([version/0]).
 
--include("kafkerl.hrl").
--include("kafkerl_consumers.hrl").
-
 %% Types
+-type callback()   :: pid() |
+                      fun() | 
+                      {atom(), atom()} |
+                      {atom(), atom(), [any()]}.
 -type option()     :: {buffer_size, integer() | infinity} | 
                       {dump_location, string()} | 
                       {consumer, callback()} |
                       {min_bytes, integer()} |
                       {max_wait, integer()} |
-                      {offset, integer()}.
+                      {offset, integer()} |
+                      {fetch_interval, false | integer()}.
 -type options()    :: [option()].
 -type server_ref() :: atom() | pid().
 
--export_type([options/0, server_ref/0]).
+-type error() :: {error, atom() | {atom(), any()}}.
+
+-type topic()     :: binary().
+-type partition() :: integer().
+-type payload()   :: binary() | [binary()].
+-type basic_message()   :: {topic(), partition(), payload()}.
+
+-export_type([server_ref/0, error/0, options/0, callback/0,
+              topic/0, partition/0, payload/0, basic_message/0]).
 
 %%==============================================================================
 %% API
@@ -75,6 +85,14 @@ consume(ServerRef, Topic, Partition, Options) ->
     _ ->
       kafkerl_connector:fetch(ServerRef, Topic, Partition, Options)
   end.
+
+-spec stop_consuming(topic(), partition()) -> ok.
+stop_consuming(Topic, Partition) ->
+  stop_consuming(?MODULE, Topic, Partition).
+
+-spec stop_consuming(server_ref(), topic(), partition()) -> ok.
+stop_consuming(ServerRef, Topic, Partition) ->
+  kafkerl_connector:stop_fetch(ServerRef, Topic, Partition).
 
 %% Metadata API
 -spec request_metadata() -> ok.
