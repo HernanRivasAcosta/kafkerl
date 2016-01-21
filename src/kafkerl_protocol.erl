@@ -41,10 +41,10 @@
                               kafkerl:error().
 -type messages()           :: [{kafkerl:topic(),
                                [{{kafkerl:partition(), integer()},
-                               [binary() | {binary(), binary()}]}]}].
+                                 [binary() | {binary(), binary()}]}]}].
 -type fetch_state()        :: {binary(), integer(), [any()]} | void.
--type fetch_response()     :: {ok, integer(), messages()} |
-                              {incomplete, integer(), messages(), fetch_state()} |
+-type fetch_response()     :: {ok, correlation_id(), messages()} |
+                              {incomplete, correlation_id(), messages(), fetch_state()} |
                               kafkerl:error().
 
 % Compression
