@@ -24,36 +24,43 @@
          handle_call/3, handle_cast/2, handle_info/2]).
 
 -include("kafkerl.hrl").
--include("kafkerl_consumers.hrl").
 
--type broker_mapping_key()  :: {topic(), partition()}.
+-type kafler_host() :: string().
+-type kafler_port() :: 1..65535.
+-type address()     :: {kafler_host(), kafler_port()}.
+
+-type filters() :: all | [atom()].
+
+-type broker_mapping_key()  :: {kafkerl:topic(), kafkerl:partition()}.
 -type broker_mapping()      :: {broker_mapping_key(), kafkerl:server_ref()}.
 
--record(state, {brokers                 = [] :: [socket_address()],
+-record(state, {brokers                 = [] :: [address()],
                 broker_mapping        = void :: [broker_mapping()] | void,
-                client_id             = <<>> :: client_id(),
+                client_id             = <<>> :: kafkerl_protocol:client_id(),
                 max_metadata_retries    = -1 :: integer(),
                 retry_interval           = 1 :: non_neg_integer(),
                 config                  = [] :: {atom(), any()},
                 autocreate_topics    = false :: boolean(),
-                callbacks               = [] :: [{filters(), callback()}],
+                callbacks               = [] :: [{filters(), kafkerl:callback()}],
                 known_topics            = [] :: [binary()],
-                pending                 = [] :: [basic_message()],
+                pending                 = [] :: [kafkerl:basic_message()],
                 last_metadata_request    = 0 :: integer(),
                 metadata_request_cd      = 0 :: integer(),
                 last_dump_name     = {"", 0} :: {string(), integer()},
                 default_fetch_options   = [] :: kafkerl:options()}).
 -type state() :: #state{}.
 
+-export_type([address/0]).
+
 %%==============================================================================
 %% API
 %%==============================================================================
--spec start_link(atom(), any()) -> {ok, pid()} | ignore | error().
+-spec start_link(atom(), any()) -> {ok, pid()} | ignore | kafkerl:error().
 start_link(Name, Config) ->
   gen_server:start_link({local, Name}, ?MODULE, [Config], []).
 
--spec send(kafkerl:server_ref(), basic_message(), kafkerl:options()) ->
-  ok | error().
+-spec send(kafkerl:server_ref(), kafkerl:basic_message(), kafkerl:options()) ->
+  ok | kafkerl:error().
 send(ServerRef, {Topic, Partition, _Payload} = Message, Options) ->
   Buffer = kafkerl_utils:buffer_name(Topic, Partition),
   case ets_buffer:write(Buffer, Message) of
@@ -69,13 +76,13 @@ send(ServerRef, {Topic, Partition, _Payload} = Message, Options) ->
       gen_server:call(ServerRef, {send, Message})
   end.
 
--spec fetch(kafkerl:server_ref(), topic(), partition(), kafkerl:options()) ->
+-spec fetch(kafkerl:server_ref(), kafkerl:topic(), kafkerl:partition(), kafkerl:options()) ->
   ok.
 fetch(ServerRef, Topic, Partition, Options) ->
   gen_server:call(ServerRef, {fetch, Topic, Partition, Options}).
 
 -spec get_partitions(kafkerl:server_ref()) ->
-  [{topic(), [partition()]}] | error().
+  [{kafkerl:topic(), [kafkerl:partition()]}] | kafkerl:error().
 get_partitions(ServerRef) ->
   case gen_server:call(ServerRef, {get_partitions}) of
     {ok, Mapping} ->
@@ -84,13 +91,14 @@ get_partitions(ServerRef) ->
       Error
   end.
 
--spec subscribe(kafkerl:server_ref(), callback()) -> ok | error().
+-spec subscribe(kafkerl:server_ref(), kafkerl:callback()) -> ok | kafkerl:error().
 subscribe(ServerRef, Callback) ->
   subscribe(ServerRef, Callback, all).
--spec subscribe(kafkerl:server_ref(), callback(), filters()) -> ok | error().
+-spec subscribe(kafkerl:server_ref(), kafkerl:callback(), filters()) ->
+  ok | kafkerl:error().
 subscribe(ServerRef, Callback, Filter) ->
   gen_server:call(ServerRef, {subscribe, {Filter, Callback}}).
--spec unsubscribe(kafkerl:server_ref(), callback()) -> ok.
+-spec unsubscribe(kafkerl:server_ref(), kafkerl:callback()) -> ok.
 unsubscribe(ServerRef, Callback) ->
   gen_server:call(ServerRef, {unsubscribe, Callback}).
 
@@ -98,16 +106,20 @@ unsubscribe(ServerRef, Callback) ->
 request_metadata(ServerRef) ->
   gen_server:call(ServerRef, {request_metadata}).
 
--spec request_metadata(kafkerl:server_ref(), [topic()] | boolean()) -> ok.
+-spec request_metadata(kafkerl:server_ref(), [kafkerl:topic()] | boolean()) ->
+  ok.
 request_metadata(ServerRef, TopicsOrForced) ->
   gen_server:call(ServerRef, {request_metadata, TopicsOrForced}).
 
--spec request_metadata(kafkerl:server_ref(), [topic()], boolean()) -> ok.
+-spec request_metadata(kafkerl:server_ref(), [kafkerl:topic()], boolean()) ->
+  ok.
 request_metadata(ServerRef, Topics, Forced) ->
   gen_server:call(ServerRef, {request_metadata, Topics, Forced}).
 
--spec produce_succeeded(kafkerl:server_ref(),
-                        [{topic(), partition(), [binary()], integer()}]) -> ok.
+-spec produce_succeeded(kafkerl:server_ref(), [{kafkerl:topic(),
+                                                kafkerl:partition(),
+                                                [binary()],
+                                                integer()}]) -> ok.
 produce_succeeded(ServerRef, Messages) ->
   gen_server:cast(ServerRef, {produce_succeeded, Messages}).
 
@@ -511,7 +523,7 @@ make_metadata_request(State = #state{brokers = Brokers,
   spawn_monitor(?MODULE, do_request_metadata, Params).
 
 get_timestamp() ->
-  {A, B, C} = erlang:now(),
+  {A, B, C} = erlang:timestamp(),
   (A * 1000000 + B) * 1000 + C div 1000.
 
 %%==============================================================================
