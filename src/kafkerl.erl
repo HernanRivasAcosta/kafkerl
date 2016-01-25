@@ -9,6 +9,8 @@
 -export([version/0]).
 
 %% Types
+-type offset()     :: integer().
+
 -type callback()   :: pid() |
                       fun() | 
                       {atom(), atom()} |
@@ -18,7 +20,7 @@
                       {consumer, callback()} |
                       {min_bytes, integer()} |
                       {max_wait, integer()} |
-                      {offset, integer()} |
+                      {offset, offset()} |
                       {fetch_interval, false | integer()}.
 -type options()    :: [option()].
 -type server_ref() :: atom() | pid().
@@ -67,7 +69,7 @@ produce(ServerRef, Topic, Partition, Message, Options) ->
 consume(Topic, Partition) ->
   consume(?MODULE, Topic, Partition, []).
 
--spec consume(topic(), partition(), options()) -> ok | [binary()] | error();
+-spec consume(topic(), partition(), options()) -> ok | error();
              (server_ref(), topic(), partition()) -> ok | error().
 consume(Topic, Partition, Options) when is_list(Options) ->
   consume(?MODULE, Topic, Partition, Options);
@@ -75,13 +77,16 @@ consume(ServerRef, Topic, Partition) ->
   consume(ServerRef, Topic, Partition, []).
 
 -spec consume(server_ref(), topic(), partition(), options()) ->
-  ok | [binary()] | error().
+  ok | {[payload()], offset()} | error().
 consume(ServerRef, Topic, Partition, Options) ->
-  case lists:keyfind(consumer, 1, Options) of
-    false ->
+  case {proplists:get_value(consumer, Options, undefined),
+        proplists:get_value(fetch_interval, Options, false)} of
+    {undefined, false} ->
       NewOptions = [{consumer, self()} | Options],
       kafkerl_connector:fetch(ServerRef, Topic, Partition, NewOptions),
       kafkerl_utils:gather_consume_responses();
+    {undefined, _} ->
+      {error, fetch_interval_specified_with_no_consumer};
     _ ->
       kafkerl_connector:fetch(ServerRef, Topic, Partition, Options)
   end.

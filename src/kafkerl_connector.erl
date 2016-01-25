@@ -10,7 +10,7 @@
 % Produce
 -export([send/3]).
 % Consume
--export([fetch/4]).
+-export([fetch/4, stop_fetch/3]).
 % Common
 -export([subscribe/2, subscribe/3, unsubscribe/2]).
 % Only for internal use
@@ -34,20 +34,20 @@
 -type broker_mapping_key()  :: {kafkerl:topic(), kafkerl:partition()}.
 -type broker_mapping()      :: {broker_mapping_key(), kafkerl:server_ref()}.
 
--record(state, {brokers                 = [] :: [address()],
-                broker_mapping        = void :: [broker_mapping()] | void,
-                client_id             = <<>> :: kafkerl_protocol:client_id(),
-                max_metadata_retries    = -1 :: integer(),
-                retry_interval           = 1 :: non_neg_integer(),
-                config                  = [] :: {atom(), any()},
-                autocreate_topics    = false :: boolean(),
-                callbacks               = [] :: [{filters(), kafkerl:callback()}],
-                known_topics            = [] :: [binary()],
-                pending                 = [] :: [kafkerl:basic_message()],
-                last_metadata_request    = 0 :: integer(),
-                metadata_request_cd      = 0 :: integer(),
-                last_dump_name     = {"", 0} :: {string(), integer()},
-                default_fetch_options   = [] :: kafkerl:options()}).
+-record(state, {brokers               = [] :: [address()],
+                broker_mapping      = void :: [broker_mapping()] | void,
+                client_id           = <<>> :: kafkerl_protocol:client_id(),
+                max_metadata_retries  = -1 :: integer(),
+                retry_interval         = 1 :: non_neg_integer(),
+                config                = [] :: {atom(), any()},
+                autocreate_topics  = false :: boolean(),
+                callbacks             = [] :: [{filters(), kafkerl:callback()}],
+                known_topics          = [] :: [binary()],
+                pending               = [] :: [kafkerl:basic_message()],
+                last_metadata_request  = 0 :: integer(),
+                metadata_request_cd    = 0 :: integer(),
+                last_dump_name   = {"", 0} :: {string(), integer()},
+                default_fetch_options = [] :: kafkerl:options()}).
 -type state() :: #state{}.
 
 -export_type([address/0]).
@@ -72,14 +72,19 @@ send(ServerRef, {Topic, Partition, _Payload} = Message, Options) ->
           ok
       end;
     Error ->
-      lager:debug("unable to send message to ~p, reason: ~p", [Buffer, Error]),
+      _ = lager:debug("unable to write on ~p, reason: ~p", [Buffer, Error]),
       gen_server:call(ServerRef, {send, Message})
   end.
 
--spec fetch(kafkerl:server_ref(), kafkerl:topic(), kafkerl:partition(), kafkerl:options()) ->
-  ok.
+-spec fetch(kafkerl:server_ref(), kafkerl:topic(), kafkerl:partition(),
+            kafkerl:options()) -> ok | kafkerl:error().
 fetch(ServerRef, Topic, Partition, Options) ->
   gen_server:call(ServerRef, {fetch, Topic, Partition, Options}).
+
+-spec stop_fetch(kafkerl:server_ref(), kafkerl:topic(), kafkerl:partition()) ->
+  ok.
+stop_fetch(ServerRef, Topic, Partition) ->
+  gen_server:call(ServerRef, {stop_fetch, Topic, Partition}).
 
 -spec get_partitions(kafkerl:server_ref()) ->
   [{kafkerl:topic(), [kafkerl:partition()]}] | kafkerl:error().
@@ -91,7 +96,8 @@ get_partitions(ServerRef) ->
       Error
   end.
 
--spec subscribe(kafkerl:server_ref(), kafkerl:callback()) -> ok | kafkerl:error().
+-spec subscribe(kafkerl:server_ref(), kafkerl:callback()) ->
+  ok | kafkerl:error().
 subscribe(ServerRef, Callback) ->
   subscribe(ServerRef, Callback, all).
 -spec subscribe(kafkerl:server_ref(), kafkerl:callback(), filters()) ->
@@ -132,15 +138,17 @@ handle_call({dump_buffer_to_disk, Buffer, Options}, _From, State) ->
   {DumpNameStr, _} = DumpName = get_ets_dump_name(State#state.last_dump_name),
   AllMessages = ets_buffer:read_all(Buffer),
   FilePath = proplists:get_value(dump_location, Options, "") ++ DumpNameStr,
-  ok = case file:write_file(FilePath, term_to_binary(AllMessages)) of
-         ok    -> lager:debug("Dumped unsent messages at ~p", [FilePath]);
-         Error -> lager:critical("Unable to save messages, reason: ~p", [Error])
-       end,
+  _ = case file:write_file(FilePath, term_to_binary(AllMessages)) of
+        ok    -> lager:debug("Dumped unsent messages at ~p", [FilePath]);
+        Error -> lager:critical("Unable to save messages, reason: ~p", [Error])
+      end,
   {reply, ok, State#state{last_dump_name = DumpName}};
 handle_call({send, Message}, _From, State) ->
   handle_send(Message, State);
 handle_call({fetch, Topic, Partition, Options}, _From, State) ->
   {reply, handle_fetch(Topic, Partition, Options, State), State};
+handle_call({stop_fetch, Topic, Partition}, _From, State) ->
+  {reply, handle_stop_fetch(Topic, Partition, State), State};
 handle_call({request_metadata}, _From, State) ->
   {reply, ok, handle_request_metadata(State, [])};
 handle_call({request_metadata, Forced}, _From, State) when is_boolean(Forced) ->
@@ -170,7 +178,7 @@ handle_info({metadata_updated, []}, State) ->
 handle_info({metadata_updated, Mapping}, State) ->
   % Create the topic mapping (this also starts the broker connections)
   NewBrokerMapping = get_broker_mapping(Mapping, State),
-  lager:debug("Refreshed topic mapping: ~p", [NewBrokerMapping]),
+  _ = lager:debug("Refreshed topic mapping: ~p", [NewBrokerMapping]),
   % Get the partition data to send to the subscribers and send it
   PartitionData = get_partitions_from_mapping(NewBrokerMapping),
   Callbacks = State#state.callbacks,
@@ -178,7 +186,7 @@ handle_info({metadata_updated, Mapping}, State) ->
   % Add to the list of known topics
   NewTopics = lists:sort([T || {T, _P} <- PartitionData]),
   NewKnownTopics = lists:umerge(NewTopics, State#state.known_topics),
-  lager:debug("Known topics: ~p", [NewKnownTopics]),
+  _ = lager:debug("Known topics: ~p", [NewKnownTopics]),
   % Reverse the pending messages and try to send them again
   RPending = lists:reverse(State#state.pending),
   ok = lists:foreach(fun(P) -> send(self(), P, []) end, RPending),
@@ -189,11 +197,11 @@ handle_info({'DOWN', Ref, process, _, normal}, State) ->
   true = demonitor(Ref),
   {noreply, State};
 handle_info({'DOWN', Ref, process, _, Reason}, State) ->
-  lager:error("metadata request failed, reason: ~p", [Reason]),
+  _ = lager:error("metadata request failed, reason: ~p", [Reason]),
   true = demonitor(Ref),
   {noreply, handle_request_metadata(State, [], true)};
 handle_info(Msg, State) ->
-  lager:notice("Unexpected info message received: ~p on ~p", [Msg, State]),
+  _ = lager:notice("Unexpected info message received: ~p on ~p", [Msg, State]),
   {noreply, State}.
 
 -spec handle_cast(any(), state()) -> {noreply, state()}.
@@ -238,44 +246,51 @@ init([Config]) ->
       {ok, State};
     {errors, Errors} ->
       lists:foreach(fun(E) ->
-                      lager:critical("Connector config error ~p", [E])
+                      _ = lager:critical("Connector config error ~p", [E])
                     end, Errors),
       {stop, bad_config}
   end.
 
 handle_send(Message, State = #state{autocreate_topics = false}) ->
+  lager:critical("a.1 ~p", [Message]),
   % The topic didn't exist, ignore
   {Topic, _Partition, Payload} = Message,
-  lager:error("Dropping ~p sent to non existing topic ~p", [Payload, Topic]),
-  {reply, ok, State};
+  _ = lager:error("Dropped ~p sent to non existing topic ~p", [Payload, Topic]),
+  {reply, {error, non_existing_topic}, State};
 handle_send(Message, State = #state{broker_mapping = void,
                                     pending = Pending}) ->
-  % Maybe have a new buffer
+  lager:critical("b.1 ~p", [Message]),
+  % We should consider saving this to a new buffer instead of using the state.
   {reply, ok, State#state{pending = [Message | Pending]}};
 handle_send(Message, State = #state{broker_mapping = Mapping, pending = Pending,
                                     known_topics = KnownTopics}) ->
+  lager:critical("c.1 ~p", [Message]),
   {Topic, Partition, Payload} = Message,
   case lists:any(fun({K, _}) -> K =:= {Topic, Partition} end, Mapping) of
     true ->
-      % We need to check if the topic/partition pair exists, this is because the
-      % ets takes some time to start, so some messages could be lost.
-      % Therefore if we have the topic/partition, just send it again (the order
-      % will suffer though)
-      send(self(), Message, []),
+      % The ets takes some time to be available after being created, so we check
+      % if the topic/partition pair is in the mapping and if it does, we know we
+      % just need to send it again. The order is not guaranteed in this case, so
+      % if that's a concern, don't rely on autocreate_topics (besides, don't use
+      % autocreate_topics on production since it opens another can of worms).
+      ok = send(self(), Message, []),
       {reply, ok, State};
     false ->
-      % Now, if the topic/partition was not valid, we need to check if the topic
-      % exists, if it does, just drop the message as we can assume no partitions
-      % are created.
+      % However, if the topic/partition pair does not exist, we need to check if
+      % the topic exists. If the topic exists, we drop the message because kafka
+      % can't add partitions on the fly.
       case lists:any(fun({{T, _}, _}) -> T =:= Topic end, Mapping) of
         true ->
-          lager:error("Dropping ~p sent to topic ~p, partition ~p",
-                      [Payload, Topic, Partition]),
-          {reply, ok, State};
+          _ = lager:error("Dropped ~p sent to topic ~p, partition ~p",
+                          [Payload, Topic, Partition]),
+          {reply, {error, bad_partition}, State};
         false ->
           NewKnownTopics = lists:umerge([Topic], KnownTopics),
           NewState = State#state{pending = [Message | Pending]},
-          {reply, ok, handle_request_metadata(NewState, NewKnownTopics)}
+          lager:critical("X"),
+          R={reply, ok, handle_request_metadata(NewState, NewKnownTopics)},
+          lager:critical("X2"),
+          R
       end
   end.
 
@@ -288,6 +303,18 @@ handle_fetch(Topic, Partition, Options, State) ->
     {_, Broker} ->
       NewOptions = Options ++ State#state.default_fetch_options,
       kafkerl_broker_connection:fetch(Broker, Topic, Partition, NewOptions)
+  end.
+
+handle_stop_fetch(_Topic, _Partition, #state{broker_mapping = void}) ->
+  % Ignore, there's no fetch in progress
+  ok;
+handle_stop_fetch(Topic, Partition, State) ->
+  case lists:keyfind({Topic, Partition}, 1, State#state.broker_mapping) of
+    false ->
+      % Ignore, there's no fetch in progress
+      ok;
+    {_, Broker} ->
+      kafkerl_broker_connection:stop_fetch(Broker, Topic, Partition)
   end.
 
 handle_get_partitions(#state{broker_mapping = void}) ->
@@ -355,7 +382,7 @@ do_request_metadata(Pid, Brokers, TCPOpts, Retries, RetryInterval, Request) ->
 do_request_metadata([], _TCPOpts, _Request) ->
   {error, all_down};
 do_request_metadata([{Host, Port} = _Broker | T], TCPOpts, Request) ->
-  lager:debug("Attempting to connect to broker at ~s:~p", [Host, Port]),
+  _ = lager:debug("Attempting to connect to broker at ~s:~p", [Host, Port]),
   % Connect to the Broker
   case gen_tcp:connect(Host, Port, TCPOpts) of
     {error, Reason} ->
@@ -435,12 +462,12 @@ expand_topic({?NO_ERROR, Topic, Partitions}) ->
   {true, {Topic, Partitions}};
 expand_topic({Error = ?REPLICA_NOT_AVAILABLE, Topic, Partitions}) ->
   % Replica not available can be ignored, still, show a warning
-  lager:warning("Ignoring ~p on metadata for topic ~p",
-                [kafkerl_error:get_error_name(Error), Topic]),
+  _ = lager:warning("Ignoring ~p on metadata for topic ~p",
+                    [kafkerl_error:get_error_name(Error), Topic]),
   {true, {Topic, Partitions}};
 expand_topic({Error, Topic, _Partitions}) ->
-  lager:error("Error ~p on metadata for topic ~p",
-              [kafkerl_error:get_error_name(Error), Topic]),
+  _ = lager:error("Error ~p on metadata for topic ~p",
+                  [kafkerl_error:get_error_name(Error), Topic]),
   {true, {Topic, []}}.
 
 expand_partitions(Metadata) ->
@@ -453,13 +480,13 @@ expand_partitions({Topic, [{?NO_ERROR, Partition, Leader, _, _} | T]}, Acc) ->
   expand_partitions({Topic, T}, [ExpandedPartition | Acc]);
 expand_partitions({Topic, [{Error = ?REPLICA_NOT_AVAILABLE, Partition, Leader,
                             _, _} | T]}, Acc) ->
-  lager:warning("Ignoring ~p on metadata for topic ~p, partition ~p",
-                [kafkerl_error:get_error_name(Error), Topic, Partition]),
+  _ = lager:warning("Ignoring ~p on metadata for topic ~p, partition ~p",
+                    [kafkerl_error:get_error_name(Error), Topic, Partition]),
   ExpandedPartition = {{Topic, Partition}, Leader},
   expand_partitions({Topic, T}, [ExpandedPartition | Acc]);
 expand_partitions({Topic, [{Error, Partition, _, _, _} | T]}, Acc) ->
-  lager:error("Error ~p on metadata for topic ~p, partition ~p",
-              [kafkerl_error:get_error_name(Error), Topic, Partition]),
+  _ = lager:error("Error ~p on metadata for topic ~p, partition ~p",
+                  [kafkerl_error:get_error_name(Error), Topic, Partition]),
   expand_partitions({Topic, T}, Acc).
 
 get_broker_mapping(TopicMapping, State) ->
@@ -530,5 +557,5 @@ get_timestamp() ->
 %% Error handling
 %%==============================================================================
 warn_metadata_request(Host, Port, Reason) ->
-  lager:warning("Unable to retrieve metadata from ~s:~p, reason: ~p",
-                [Host, Port, Reason]).
+  _ = lager:warning("Unable to retrieve metadata from ~s:~p, reason: ~p",
+                    [Host, Port, Reason]).
