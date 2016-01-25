@@ -6,6 +6,7 @@
 -export([merge_messages/1, split_messages/1, valid_message/1]).
 -export([buffer_name/2]).
 -export([gather_consume_responses/0, gather_consume_responses/1]).
+-export([proplists_set/2]).
 
 %%==============================================================================
 %% API
@@ -72,6 +73,17 @@ valid_message(_Any) ->
 buffer_name(Topic, Partition) ->
   Bin = <<Topic/binary, $., (integer_to_binary(Partition))/binary, "_buffer">>,
   binary_to_atom(Bin, utf8).
+
+-type proplist_value() :: {atom(), any()}.
+-type proplist()       :: [proplist_value].
+-spec proplists_set(proplist(), proplist_value() | [proplist_value()]) ->
+  proplist().
+proplists_set(Proplist, {K, _V} = NewValue) ->
+  lists:keyreplace(K, 1, Proplist, NewValue);
+proplists_set(Proplist, []) ->
+  Proplist;
+proplists_set(Proplist, [H | T]) ->
+  proplists_set(proplists_set(Proplist, H), T).
 
 %%==============================================================================
 %% Utils
@@ -141,15 +153,12 @@ gather_consume_responses(Timeout) ->
   gather_consume_responses(Timeout, []).
 gather_consume_responses(Timeout, Acc) ->
   receive
-    {message_count, _} ->
-      % Ignore this one
-      gather_consume_responses(Timeout, Acc);
     {consumed, Messages} ->
       gather_consume_responses(Timeout, Acc ++ Messages);
-    {consume_done, Messages} ->
-      Acc ++ Messages;
+    {offset, Offset} ->
+      {Acc, Offset};
     {error, _Reason} = Error ->
       Error
   after Timeout ->
-    {error, {no_response, Acc}}
+    []
   end.

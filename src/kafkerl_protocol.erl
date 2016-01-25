@@ -18,11 +18,13 @@
 %% Requests
 -type client_id()       :: binary().
 -type merged_message()  :: kafkerl:basic_message() |
-                           {kafkerl:topic(), [{kafkerl:partition(), kafkerl:payload()}]} |
+                           {kafkerl:topic(),
+                            [{kafkerl:partition(), kafkerl:payload()}]} |
                            [merged_message()].
 -type fetch_offset()    :: integer().
 -type fetch_max_bytes() :: integer().
--type fetch_partition() :: {kafkerl:partition(), fetch_offset(), fetch_max_bytes()} |
+-type fetch_partition() :: {kafkerl:partition(), fetch_offset(),
+                            fetch_max_bytes()} |
                            [fetch_partition()].
 -type fetch_request()   :: {kafkerl:topic(), fetch_partition()} |
                            [fetch_request()].
@@ -35,7 +37,8 @@
 -type isr()                :: integer().
 -type partition_metadata() :: {error_code(), kafkerl:partition(), broker_id(),
                                [replica()], [isr()]}.
--type topic_metadata()     :: {error_code(), kafkerl:topic(), [partition_metadata()]}.
+-type topic_metadata()     :: {error_code(), kafkerl:topic(),
+                               [partition_metadata()]}.
 -type metadata()           :: {[broker()], [topic_metadata()]}.
 -type metadata_response()  :: {ok, correlation_id(), metadata()} |
                               kafkerl:error().
@@ -44,7 +47,8 @@
                                  [binary() | {binary(), binary()}]}]}].
 -type fetch_state()        :: {binary(), integer(), [any()]} | void.
 -type fetch_response()     :: {ok, correlation_id(), messages()} |
-                              {incomplete, correlation_id(), messages(), fetch_state()} |
+                              {incomplete, correlation_id(), messages(),
+                               fetch_state()} |
                               kafkerl:error().
 
 % Compression
@@ -81,7 +85,8 @@
 %% API
 %%==============================================================================
 % Message building
--spec build_produce_request(merged_message(), client_id(), correlation_id()) -> iodata().
+-spec build_produce_request(merged_message(), client_id(), correlation_id()) ->
+  iodata().
 build_produce_request(Data, ClientId, CorrelationId) ->
   build_produce_request(Data, ClientId, CorrelationId, ?COMPRESSION_NONE).
 -spec build_produce_request(merged_message(), client_id(), correlation_id(),
