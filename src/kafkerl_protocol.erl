@@ -1,18 +1,94 @@
 -module(kafkerl_protocol).
 -author('hernanrivasacosta@gmail.com').
 
--export([build_produce_request/4, build_fetch_request/5,
+-export([build_produce_request/3, build_produce_request/4,
+         build_fetch_request/5,
          build_metadata_request/3]).
 
--export([parse_produce_response/1, parse_fetch_response/1,
+-export([parse_correlation_id/1,
+         parse_produce_response/1, parse_fetch_response/1,
          parse_fetch_response/2, parse_metadata_response/1]).
 
--include("kafkerl.hrl").
+%% Common
+-type error_code()     :: -1..16.
+-type correlation_id() :: non_neg_integer().
+-type broker_id()      :: integer().
+-type broker()         :: {broker_id(), kafkerl_connector:address()}.
+
+%% Requests
+-type client_id()       :: binary().
+-type merged_message()  :: kafkerl:basic_message() |
+                           {kafkerl:topic(),
+                            [{kafkerl:partition(), kafkerl:payload()}]} |
+                           [merged_message()].
+-type fetch_offset()    :: integer().
+-type fetch_max_bytes() :: integer().
+-type fetch_partition() :: {kafkerl:partition(), fetch_offset(),
+                            fetch_max_bytes()} |
+                           [fetch_partition()].
+-type fetch_request()   :: {kafkerl:topic(), fetch_partition()} |
+                           [fetch_request()].
+
+%% Responses
+-type produce_partition()  :: {kafkerl:partition(), error_code(), integer()}.
+-type produce_topic()      :: {kafkerl:topic(), [produce_partition()]}.
+-type produce_response()   :: {ok, correlation_id(), [produce_topic()]}.
+-type replica()            :: integer().
+-type isr()                :: integer().
+-type partition_metadata() :: {error_code(), kafkerl:partition(), broker_id(),
+                               [replica()], [isr()]}.
+-type topic_metadata()     :: {error_code(), kafkerl:topic(),
+                               [partition_metadata()]}.
+-type metadata()           :: {[broker()], [topic_metadata()]}.
+-type metadata_response()  :: {ok, correlation_id(), metadata()} |
+                              kafkerl:error().
+-type messages()           :: [{kafkerl:topic(),
+                               [{{kafkerl:partition(), integer()},
+                                 [binary() | {binary(), binary()}]}]}].
+-type fetch_state()        :: {binary(), integer(), [any()]} | void.
+-type fetch_response()     :: {ok, correlation_id(), messages()} |
+                              {incomplete, correlation_id(), messages(),
+                               fetch_state()} |
+                              kafkerl:error().
+
+% Compression
+-define(COMPRESSION_NONE,   none).
+-define(COMPRESSION_GZIP,   gzip).
+-define(COMPRESSION_SNAPPY, snappy).
+-define(KAFKERL_COMPRESSION_TYPES, [?COMPRESSION_NONE,
+                                    ?COMPRESSION_GZIP,
+                                    ?COMPRESSION_SNAPPY]).
+
+%% Configuration
+-type compression() :: ?COMPRESSION_NONE |
+                       ?COMPRESSION_GZIP |
+                       ?COMPRESSION_SNAPPY.
+
+% API keys
+-define(PRODUCE_KEY,  0).
+-define(FETCH_KEY,    1).
+-define(OFFSET_KEY,   2).
+-define(METADATA_KEY, 3).
+
+% C style binary types
+-define(SHORT,  16/signed-integer).
+-define(INT,    32/signed-integer).
+-define(UCHAR,  8/unsigned-integer).
+-define(USHORT, 16/unsigned-integer).
+-define(UINT,   32/unsigned-integer).
+-define(ULONG,  64/unsigned-integer).
+
+% Type exports
+-export_type([merged_message/0, client_id/0, correlation_id/0, fetch_state/0]).
 
 %%==============================================================================
 %% API
 %%==============================================================================
 % Message building
+-spec build_produce_request(merged_message(), client_id(), correlation_id()) ->
+  iodata().
+build_produce_request(Data, ClientId, CorrelationId) ->
+  build_produce_request(Data, ClientId, CorrelationId, ?COMPRESSION_NONE).
 -spec build_produce_request(merged_message(), client_id(), correlation_id(),
                             compression()) -> iodata().
 build_produce_request(Data, ClientId, CorrelationId, Compression) ->
@@ -25,53 +101,64 @@ build_fetch_request(Data, ClientId, CorrelationId, MaxWait, MinBytes) ->
   {Size, Request} = build_fetch_request(Data, MaxWait, MinBytes),
   [build_request_header(ClientId, ?FETCH_KEY, CorrelationId, Size), Request].
 
--spec build_metadata_request(topic() | [topic()], correlation_id(),
+-spec build_metadata_request(kafkerl:topic() | [kafkerl:topic()],
+                             correlation_id(),
                              client_id()) -> iodata().
 build_metadata_request(Topics, CorrelationId, ClientId) ->
   {_Size, Request} = build_metadata_request(Topics),
   [build_request_header(ClientId, ?METADATA_KEY, CorrelationId), Request].
 
 % Message parsing
+-spec parse_correlation_id(binary()) -> {ok, integer(), binary()}.
+parse_correlation_id(<<_Size:?UINT,
+                       CorrelationId:?UINT,
+                       Remainder/binary>>) ->
+  {ok, CorrelationId, Remainder}.
+
 -spec parse_produce_response(binary()) -> produce_response().
-parse_produce_response(<<_Size:32/unsigned-integer,
-                         CorrelationId:32/unsigned-integer,
-                         TopicCount:32/unsigned-integer,
+parse_produce_response(<<_Size:?UINT,
+                         CorrelationId:?UINT,
+                         TopicCount:?UINT,
                          TopicsBin/binary>>) ->
   {ok, Topics} = parse_produced_topics(TopicCount, TopicsBin),
   {ok, CorrelationId, Topics}.
 
 -spec parse_fetch_response(binary()) -> fetch_response().
-parse_fetch_response(<<_Size:32/unsigned-integer,
-                       CorrelationId:32/unsigned-integer,
-                       TopicCount:32/unsigned-integer,
+parse_fetch_response(<<_Size:?UINT,
+                       CorrelationId:?UINT,
+                       TopicCount:?UINT,
                        TopicsBin/binary>>) ->
   case parse_topics(TopicCount, TopicsBin) of
     {ok, Topics} ->
       {ok, CorrelationId, Topics};
     {incomplete, Topics, {Bin, Steps}} ->
-      {incomplete, CorrelationId, Topics, {Bin, CorrelationId, Steps}}
+      {incomplete, CorrelationId, Topics, {Bin, CorrelationId, Steps}};
+    {error, _Reason} = Error ->
+      Error
   end;
 parse_fetch_response(_Other) ->
   {error, unexpected_binary}.
 
 -spec parse_fetch_response(binary(), fetch_state()) -> fetch_response().
+parse_fetch_response(Bin, void) ->
+  parse_fetch_response(Bin);
 parse_fetch_response(Bin, {Remainder, CorrelationId, Steps}) ->
   NewBin = <<Remainder/binary, Bin/binary>>,
   parse_steps(NewBin, CorrelationId, Steps).
 
 -spec parse_metadata_response(binary()) -> metadata_response().
-parse_metadata_response(<<CorrelationId:32/unsigned-integer,
-                          BrokerCount:32/unsigned-integer,
+parse_metadata_response(<<CorrelationId:?UINT,
+                          BrokerCount:?UINT,
                           BrokersBin/binary>>) ->
   case parse_brokers(BrokerCount, BrokersBin) of
-    {ok, Brokers, <<TopicCount:32/unsigned-integer, TopicsBin/binary>>} ->
+    {ok, Brokers, <<TopicCount:?UINT, TopicsBin/binary>>} ->
       case parse_topic_metadata(TopicCount, TopicsBin) of
         {ok, Metadata} ->
           {ok, CorrelationId, {Brokers, Metadata}};
-        Error ->
+        {error, _Reason} = Error ->
           Error
       end;
-    Error ->
+    {error, _Reason} = Error ->
       Error
   end;
 parse_metadata_response(_Other) ->
@@ -84,16 +171,16 @@ build_request_header(ClientId, ApiKey, CorrelationId) ->
   % Build the header (http://goo.gl/5SNNTV)
   ApiVersion = 0, % The version should be 0, it's not a placeholder
   ClientIdSize = byte_size(ClientId),
-  [<<ApiKey:16/unsigned-integer,
-     ApiVersion:16/unsigned-integer,
-     CorrelationId:32/unsigned-integer,
-     ClientIdSize:16/unsigned-integer>>,
+  [<<ApiKey:?USHORT,
+     ApiVersion:?USHORT,
+     CorrelationId:?UINT,
+     ClientIdSize:?USHORT>>,
    ClientId].
 
 build_request_header(ClientId, ApiKey, CorrelationId, RequestSize) ->
   % 10 is the size of the header
   MessageSize = byte_size(ClientId) + RequestSize + 10,
-  [<<MessageSize:32/unsigned-integer>>,
+  [<<MessageSize:?UINT>>,
    build_request_header(ClientId, ApiKey, CorrelationId)].
 
 %% PRODUCE REQUEST
@@ -108,14 +195,14 @@ build_produce_request({Topic, Partition, Messages}, Compression) ->
   TopicSize = byte_size(Topic),
   {Size, MessageSet} = build_message_set(Messages, Compression),
   {Size + TopicSize + 24,
-   [<<-1:16/signed-integer,
-      -1:32/signed-integer, % Timeout
-      1:32/unsigned-integer,  % TopicCount
-      TopicSize:16/unsigned-integer>>,
+   [<<-1:?SHORT,
+      -1:?INT, % Timeout
+      1:?UINT,  % TopicCount
+      TopicSize:?USHORT>>,
     Topic,
-    <<1:32/unsigned-integer,  % PartitionCount
-      Partition:32/unsigned-integer,
-      Size:32/unsigned-integer>>,
+    <<1:?UINT,  % PartitionCount
+      Partition:?UINT,
+      Size:?UINT>>,
     MessageSet]};
 build_produce_request(Data, Compression) ->
   % Build the body of the request with multiple topics/partitions
@@ -124,9 +211,9 @@ build_produce_request(Data, Compression) ->
   {TopicsSize, Topics} = build_topics(Data, Compression),
   % 10 is the size of the header
   {TopicsSize + 10,
-   [<<-1:16/signed-integer, % RequiredAcks
-      -1:32/signed-integer, % Timeout
-      TopicCount:32/unsigned-integer>>,
+   [<<-1:?SHORT, % RequiredAcks
+      -1:?INT, % Timeout
+      TopicCount:?UINT>>,
       Topics]}.
 
 build_topics(Topics, Compression) ->
@@ -146,9 +233,9 @@ build_topic({Topic, Partitions}, Compression) ->
   {Size, BuiltPartitions} = build_partitions(Partitions, Compression),
   % 6 is the size of both the partition count int and the topic size int
   {Size + TopicSize + 6,
-   [<<TopicSize:16/unsigned-integer,
+   [<<TopicSize:?USHORT,
       Topic/binary,
-      PartitionCount:32/unsigned-integer>>,
+      PartitionCount:?UINT>>,
     BuiltPartitions]}.
 
 build_partitions(Partitions, Compression) ->
@@ -166,8 +253,8 @@ build_partition({Partition, Messages}, Compression) ->
   {Size, MessageSet} = build_message_set(Messages, Compression),
   % 8 is the size of the header, 4 bytes of the partition and 4 for the size
   {Size + 8,
-   [<<Partition:32/unsigned-integer,
-      Size:32/unsigned-integer>>,
+   [<<Partition:?UINT,
+      Size:?UINT>>,
     MessageSet]}.
 
 % Docs at http://goo.gl/4W7J0r
@@ -196,18 +283,18 @@ build_message(Bin) ->
   Crc = erlang:crc32(Message),
   % 12 is the size of the offset plus the size int itself
   {Size + 12,
-   [<<Offset:64/unsigned-integer,
-      Size:32/unsigned-integer,
-      Crc:32/unsigned-integer>>,
+   [<<Offset:?ULONG,
+      Size:?UINT,
+      Crc:?UINT>>,
     Message]}.
 
 get_message_header(MessageSize, Compression) ->
   MagicByte = 0, % Version id
   Attributes = compression_to_int(Compression),
-  <<MagicByte:8/unsigned-integer,
-    Attributes:8/unsigned-integer,
-    -1:32/signed-integer,
-    MessageSize:32/unsigned-integer>>.
+  <<MagicByte:?UCHAR,
+    Attributes:?UCHAR,
+    -1:?INT,
+    MessageSize:?UINT>>.
 
 compression_to_int(?COMPRESSION_NONE)   -> 0;
 compression_to_int(?COMPRESSION_GZIP)   -> 1;
@@ -230,26 +317,26 @@ build_fetch_request({Topic, {Partition, Offset, MaxBytes}},
                     MaxWait, MinBytes) ->
   TopicSize = byte_size(Topic),
   {TopicSize + 38,
-   [<<-1:32/signed-integer,  % ReplicaId
-      MaxWait:32/unsigned-integer,
-      MinBytes:32/unsigned-integer,
-      1:32/unsigned-integer, % TopicCount
-      TopicSize:16/unsigned-integer>>,
+   [<<-1:?INT,  % ReplicaId
+      MaxWait:?UINT,
+      MinBytes:?UINT,
+      1:?UINT, % TopicCount
+      TopicSize:?USHORT>>,
     Topic,
-    <<1:32/unsigned-integer, % PartitionCount
-      Partition:32/unsigned-integer,
-      Offset:64/unsigned-integer,
-      MaxBytes:32/unsigned-integer>>]};
+    <<1:?UINT, % PartitionCount
+      Partition:?UINT,
+      Offset:?ULONG,
+      MaxBytes:?UINT>>]};
 build_fetch_request(Data, MaxWait, MinBytes) ->
   ReplicaId = -1, % This should always be -1
   TopicCount = length(Data),
   {TopicSize, Topics} = build_fetch_topics(Data),
   % 16 is the size of the header
   {TopicSize + 16,
-   [<<ReplicaId:32/signed-integer,
-      MaxWait:32/unsigned-integer,
-      MinBytes:32/unsigned-integer,
-      TopicCount:32/unsigned-integer>>,
+   [<<ReplicaId:?INT,
+      MaxWait:?UINT,
+      MinBytes:?UINT,
+      TopicCount:?UINT>>,
     Topics]}.
 
 build_fetch_topics(Topics) ->
@@ -269,9 +356,9 @@ build_fetch_topic({Topic, Partitions}) ->
   {Size, BuiltPartitions} = build_fetch_partitions(Partitions),
   % 6 is the size of the topicSize's 16 bytes + 32 from the partition count
   {Size + TopicSize + 6,
-   [<<TopicSize:16/unsigned-integer,
+   [<<TopicSize:?USHORT,
       Topic/binary,
-      PartitionCount:32/unsigned-integer>>,
+      PartitionCount:?UINT>>,
     BuiltPartitions]}.
 
 build_fetch_partitions(Partitions) ->
@@ -285,20 +372,20 @@ build_fetch_partitions([H | T] = _Partitions, {OldSize, IOList}) ->
 
 build_fetch_partition({Partition, Offset, MaxBytes}) ->
   {16,
-   <<Partition:32/unsigned-integer,
-     Offset:64/unsigned-integer,
-     MaxBytes:32/unsigned-integer>>}.
+   <<Partition:?UINT,
+     Offset:?ULONG,
+     MaxBytes:?UINT>>}.
 
 build_metadata_request([]) ->
   % Builds an empty metadata request that returns all topics and partitions
-  {4, <<0:32/unsigned-integer>>};
+  {4, <<0:?UINT>>};
 build_metadata_request(Topic) when is_binary(Topic) ->
   build_metadata_request([Topic]);
 build_metadata_request(Topics) ->
   TopicCount = length(Topics),
   {Size, BuiltTopics} = build_metadata_topics(Topics),
   {Size + 4,
-   [<<TopicCount:32/unsigned-integer>>,
+   [<<TopicCount:?UINT>>,
     BuiltTopics]}.
 
 build_metadata_topics(Topics) ->
@@ -308,7 +395,7 @@ build_metadata_topics([] = _Topics, {Size, IOList}) ->
   {Size, lists:reverse(IOList)};
 build_metadata_topics([H | T] = _Partitions, {OldSize, IOList}) ->
   Size = byte_size(H),
-  Topic = [<<Size:16/unsigned-integer>>, H],
+  Topic = [<<Size:?USHORT>>, H],
   build_metadata_topics(T, {OldSize + Size + 2, [Topic | IOList]}).
 
 %%==============================================================================
@@ -323,9 +410,9 @@ parse_produced_topics(Count, <<>>, Acc) when Count =< 0 ->
 parse_produced_topics(Count, Bin, Acc) when Count =< 0 ->
   lager:warning("Finished parsing produce response, ignoring bytes: ~p", [Bin]),
   {ok, lists:reverse(Acc)};
-parse_produced_topics(Count, <<TopicNameLength:16/unsigned-integer,
+parse_produced_topics(Count, <<TopicNameLength:?USHORT,
                                TopicName:TopicNameLength/binary,
-                               PartitionCount:32/unsigned-integer,
+                               PartitionCount:?UINT,
                                PartitionsBin/binary>>, Acc) ->
   {ok, Partitions, Remainder} = parse_produced_partitions(PartitionCount,
                                                           PartitionsBin),
@@ -336,9 +423,9 @@ parse_produced_partitions(Count, Bin) ->
 
 parse_produced_partitions(Count, Bin, Acc) when Count =< 0 ->
   {ok, lists:reverse(Acc), Bin};
-parse_produced_partitions(Count, <<Partition:32/unsigned-integer,
-                                   ErrorCode:16/signed-integer,
-                                   Offset:64/unsigned-integer,
+parse_produced_partitions(Count, <<Partition:?UINT,
+                                   ErrorCode:?SHORT,
+                                   Offset:?ULONG,
                                    Remainder/binary>>, Acc) ->
   PartitionData = {Partition, ErrorCode, Offset},
   parse_produced_partitions(Count - 1, Remainder, [PartitionData | Acc]).
@@ -361,19 +448,23 @@ parse_topics(Count, Bin, Acc) ->
       Step = {topics, Count},
       {incomplete, lists:reverse(Acc, [Topic]), {Remainder, Steps ++ [Step]}};
     incomplete ->
-      {incomplete, lists:reverse(Acc), {Bin, [{topics, Count}]}}
+      {incomplete, lists:reverse(Acc), {Bin, [{topics, Count}]}};
+    {error, _Reason} = Error ->
+      Error
   end.
 
-parse_topic(<<TopicNameLength:16/unsigned-integer,
+parse_topic(<<TopicNameLength:?USHORT,
               TopicName:TopicNameLength/binary,
-              PartitionCount:32/unsigned-integer,
+              PartitionCount:?UINT,
               PartitionsBin/binary>>) ->
   case parse_partitions(PartitionCount, PartitionsBin) of
     {ok, Partitions, Remainder} ->
       {ok, {TopicName, Partitions}, Remainder};
     {incomplete, Partitions, {Bin, Steps}} ->
       Step = {topic, TopicName},
-      {incomplete, {TopicName, Partitions}, {Bin, Steps ++ [Step]}}
+      {incomplete, {TopicName, Partitions}, {Bin, Steps ++ [Step]}};
+    {error, _Reason} = Error ->
+      Error
   end;
 parse_topic(_Bin) ->
   incomplete.
@@ -393,13 +484,15 @@ parse_partitions(Count, Bin, Acc) ->
       {incomplete, lists:reverse(Acc, [Partition]), NewState};
     incomplete ->
       Step = {partitions, Count},
-      {incomplete, lists:reverse(Acc), {Bin, [Step]}}
+      {incomplete, lists:reverse(Acc), {Bin, [Step]}};
+    {error, _Reason} = Error ->
+      Error
   end.
 
-parse_partition(<<PartitionId:32/unsigned-integer,
-                  0:16/signed-integer,
-                  HighwaterMarkOffset:64/unsigned-integer,
-                  MessageSetSize:32/unsigned-integer,
+parse_partition(<<PartitionId:?UINT,
+                  0:?SHORT,
+                  HighwaterMarkOffset:?ULONG,
+                  MessageSetSize:?UINT,
                   MessageSetBin/binary>>) ->
   Partition = {PartitionId, HighwaterMarkOffset},
   case parse_message_set(MessageSetSize, MessageSetBin) of
@@ -409,8 +502,8 @@ parse_partition(<<PartitionId:32/unsigned-integer,
       Step = {partition, Partition},
       {incomplete, {Partition, Messages}, {Bin, Steps ++ [Step]}}
   end;
-parse_partition(<<_Partition:32/unsigned-integer,
-                  ErrorCode:16/signed-integer,
+parse_partition(<<_Partition:?UINT,
+                  ErrorCode:?SHORT,
                   _/binary>>) ->
   kafkerl_error:get_error_tuple(ErrorCode);
 parse_partition(<<>>) ->
@@ -429,22 +522,22 @@ parse_message_set(RemainingSize, Bin, Acc) ->
       {incomplete, lists:reverse(Acc), {Bin, [{message_set, RemainingSize}]}}
   end.
 
-parse_message(<<_Offset:64/unsigned-integer,
-                MessageSize:32/signed-integer,
+parse_message(<<_Offset:?ULONG,
+                MessageSize:?INT,
                 Message:MessageSize/binary,
                 Remainder/binary>>) ->
-  <<_Crc:32/unsigned-integer,
-    _MagicByte:8/unsigned-integer,
-    _Attributes:8/unsigned-integer,
+  <<_Crc:?UINT,
+    _MagicByte:?UCHAR,
+    _Attributes:?UCHAR,
     KeyValue/binary>> = Message,
   KV = case KeyValue of
-         <<KeySize:32/unsigned-integer, Key:KeySize/binary,
-           ValueSize:32/unsigned-integer, Value:ValueSize/binary>> ->
+         <<KeySize:?UINT, Key:KeySize/binary,
+           ValueSize:?UINT, Value:ValueSize/binary>> ->
              {Key, Value};
          % 4294967295 is -1 and it signifies an empty Key http://goo.gl/Ssl4wq
-         <<4294967295:32/unsigned-integer,
-           ValueSize:32/unsigned-integer, Value:ValueSize/binary>> ->
-             {no_key, Value}
+         <<4294967295:?UINT,
+           ValueSize:?UINT, Value:ValueSize/binary>> ->
+             Value
        end,
   % 12 is the size of the offset plus the size of the MessageSize int
   {ok, {KV, MessageSize + 12}, Remainder};
@@ -457,10 +550,10 @@ parse_brokers(Count, Bin) ->
 
 parse_brokers(Count, Bin, Acc) when Count =< 0 ->
   {ok, lists:reverse(Acc), Bin};
-parse_brokers(Count, <<Id:32/unsigned-integer,
-                       HostLength:16/unsigned-integer,
+parse_brokers(Count, <<Id:?UINT,
+                       HostLength:?USHORT,
                        Host:HostLength/binary,
-                       Port:32/unsigned-integer,
+                       Port:?UINT,
                        Remainder/binary>>, Acc) ->
   HostStr = binary_to_list(Host),
   parse_brokers(Count - 1, Remainder, [{Id, {HostStr, Port}} | Acc]).
@@ -473,18 +566,18 @@ parse_topic_metadata(Count, <<>>, Acc) when Count =< 0 ->
 parse_topic_metadata(Count, Bin, Acc) when Count =< 0 ->
   lager:warning("Finished parsing topic metadata, ignoring bytes: ~p", [Bin]),
   {ok, lists:reverse(Acc)};
-parse_topic_metadata(Count, <<0:16/signed-integer,
-                              TopicSize:16/unsigned-integer,
+parse_topic_metadata(Count, <<0:?SHORT,
+                              TopicSize:?USHORT,
                               TopicName:TopicSize/binary,
-                              PartitionCount:32/unsigned-integer,
+                              PartitionCount:?UINT,
                               PartitionsBin/binary>>, Acc) ->
   {ok, PartitionsMetadata, Remainder} = parse_partition_metadata(PartitionCount,
                                                                  PartitionsBin),
   TopicMetadata = {0, TopicName, PartitionsMetadata},
   parse_topic_metadata(Count - 1, Remainder, [TopicMetadata | Acc]);
-parse_topic_metadata(Count, <<ErrorCode:16/signed-integer,
-                              -1:16/signed-integer, % TopicSize
-                              0:32/unsigned-integer, % PartitionCount
+parse_topic_metadata(Count, <<ErrorCode:?SHORT,
+                              -1:?SHORT, % TopicSize
+                              0:?UINT, % PartitionCount
                               Remainder/binary>>, Acc) ->
   {ok, PartitionsMetadata, Remainder} = parse_partition_metadata(0, Remainder),
   TopicMetadata = {ErrorCode, <<"unkown">>, PartitionsMetadata},
@@ -495,13 +588,13 @@ parse_partition_metadata(Count, Bin) ->
 
 parse_partition_metadata(Count, Remainder, Acc) when Count =< 0 ->
   {ok, lists:reverse(Acc), Remainder};
-parse_partition_metadata(Count, <<ErrorCode:16/unsigned-integer,
-                                  Partition:32/unsigned-integer,
-                                  Leader:32/signed-integer,
-                                  ReplicaCount:32/unsigned-integer,
+parse_partition_metadata(Count, <<ErrorCode:?USHORT,
+                                  Partition:?UINT,
+                                  Leader:?INT,
+                                  ReplicaCount:?UINT,
                                   ReplicasBin/binary>>, Acc) ->
   {ok, Replicas, Remainder} = parse_replica_metadata(ReplicaCount, ReplicasBin),
-  <<IsrCount:32/unsigned-integer, IsrBin/binary>> = Remainder,
+  <<IsrCount:?UINT, IsrBin/binary>> = Remainder,
   {ok, Isr, IsrRemainder} = parse_isr_metadata(IsrCount, IsrBin),
   PartitionMetadata = {ErrorCode, Partition, Leader, Replicas, Isr},
   parse_partition_metadata(Count - 1, IsrRemainder, [PartitionMetadata | Acc]).
@@ -511,7 +604,7 @@ parse_replica_metadata(Count, Bin) ->
 
 parse_replica_metadata(Count, Remainder, Acc) when Count =< 0 ->
   {ok, lists:reverse(Acc), Remainder};
-parse_replica_metadata(Count, <<Replica:32/unsigned-integer,
+parse_replica_metadata(Count, <<Replica:?UINT,
                                  Remainder/binary>>, Acc) ->
   parse_replica_metadata(Count - 1, Remainder, [Replica | Acc]).
 
@@ -520,7 +613,7 @@ parse_isr_metadata(Count, Bin) ->
 
 parse_isr_metadata(Count, Remainder, Acc) when Count =< 0 ->
   {ok, lists:reverse(Acc), Remainder};
-parse_isr_metadata(Count, <<Isr:32/unsigned-integer,
+parse_isr_metadata(Count, <<Isr:?UINT,
                             Remainder/binary>>, Acc) ->
   parse_isr_metadata(Count - 1, Remainder, [Isr | Acc]).
 

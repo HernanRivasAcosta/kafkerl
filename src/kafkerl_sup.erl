@@ -5,8 +5,6 @@
 
 -export([start_link/0, init/1]).
 
--include("kafkerl.hrl").
-
 -define(SERVER, ?MODULE).
 
 -type restart_strategy() :: {supervisor:strategy(),
