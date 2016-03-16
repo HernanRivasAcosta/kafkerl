@@ -6,8 +6,6 @@
 %% API
 -export([send/3, request_metadata/1, request_metadata/2, request_metadata/3,
          subscribe/2, subscribe/3, get_partitions/1, unsubscribe/2]).
-% Only for internal use
--export([make_metadata_request/1]).
 % Only for broker connections
 -export([produce_succeeded/2]).
 % Supervisors
@@ -33,7 +31,6 @@
                 callbacks               = [] :: [{filters(), callback()}],
                 known_topics            = [] :: [binary()],
                 pending                 = [] :: [basic_message()],
-                last_metadata_request    = 0 :: integer(),
                 metadata_request_cd      = 0 :: integer(),
                 last_dump_name     = {"", 0} :: {string(), integer()}}).
 -type state() :: #state{}.
@@ -203,7 +200,8 @@ init([Config]) ->
                      autocreate_topics    = AutocreateTopics,
                      max_metadata_retries = MaxMetadataRetries,
                      metadata_request_cd  = MetadataRequestCooldown},
-      {_Pid, _Ref} = make_metadata_request(State),
+      {ok, _Pid} = kafkerl_metadata_requester:start_link(),
+      erlang:send_after(0, self(), {metadata_updated, []}),
       {ok, State};
     {errors, Errors} ->
       lists:foreach(fun(E) ->
@@ -267,17 +265,6 @@ handle_request_metadata(State = #state{brokers = Brokers,
                                  NewTopics, _) ->
   SortedNewTopics = lists:sort(NewTopics),
   NewKnownTopics = lists:umerge(State#state.known_topics, SortedNewTopics),
-%%  Now = get_timestamp(),
-%%  LastRequest = State#state.last_metadata_request,
-%%  Cooldown = State#state.metadata_request_cd,
-%%  LastMetadataUpdate = case Cooldown - (Now - LastRequest) of
-%%        Negative when Negative =< 0 ->
-%%          _ = make_metadata_request(State),
-%%          Now;
-%%        Time ->
-%%          _ = timer:apply_after(Time, ?MODULE, request_metadata, [self(), true]),
-%%          LastRequest
-%%      end,
   Request = metadata_request(State, Topics),
   % Start requesting metadata
   BrokerMapping = case kafkerl_metadata_requester:req_metadata(Brokers, get_metadata_tcp_options(), MaxMetadataRetries,
@@ -286,8 +273,7 @@ handle_request_metadata(State = #state{brokers = Brokers,
     {error, all_down} -> void;
     {metadata_updated, Mapping} -> Mapping
   end,
-  State#state{broker_mapping = BrokerMapping, known_topics = NewKnownTopics,
-              last_metadata_request = LastMetadataUpdate}.
+  State#state{broker_mapping = BrokerMapping, known_topics = NewKnownTopics}.
 
 %%==============================================================================
 %% Utils
@@ -382,12 +368,3 @@ send_mapping_to(NewCallback, #state{broker_mapping = Mapping}) ->
   Partitions = get_partitions_from_mapping(Mapping),
   send_event({partition_update, Partitions}, NewCallback).
 
-make_metadata_request(State = #state{brokers = Brokers,
-                                     known_topics = Topics,
-                                     max_metadata_retries = MaxMetadataRetries,
-                                     retry_interval = RetryInterval}) ->
-  spawn_monitor(?MODULE, do_request_metadata, Params).
-
-get_timestamp() ->
-  {A, B, C} = erlang:now(),
-  (A * 1000000 + B) * 1000 + C div 1000.
