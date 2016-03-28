@@ -269,9 +269,27 @@ handle_request_metadata(State = #state{brokers = Brokers,
   % Start requesting metadata
   BrokerMapping = case kafkerl_metadata_requester:req_metadata(Brokers, get_metadata_tcp_options(), MaxMetadataRetries,
     RetryInterval, Request) of
-    metadata_timeout -> void;
-    {error, all_down} -> void;
-    {metadata_updated, Mapping} -> Mapping
+    metadata_timeout ->
+      void;
+    {error, all_down} ->
+      void;
+    {metadata_updated, Mapping} ->
+      NewBrokerMapping = get_broker_mapping(Mapping, State),
+      lager:debug("Refreshed topic mapping: ~p", [NewBrokerMapping]),
+      % Get the partition data to send to the subscribers and send it
+      PartitionData = get_partitions_from_mapping(NewBrokerMapping),
+      Callbacks = State#state.callbacks,
+      NewCallbacks = send_event({partition_update, PartitionData}, Callbacks),
+      % Add to the list of known topics
+      Updated_Topics = lists:sort([T || {T, _P} <- PartitionData]),
+      NewKnownTopics = lists:umerge(Updated_Topics, State#state.known_topics),
+      lager:debug("Known topics: ~p", [NewKnownTopics]),
+      % Reverse the pending messages and try to send them again
+      RPending = lists:reverse(State#state.pending),
+      ok = lists:foreach(fun(P) -> send(self(), P, []) end, RPending),
+      {noreply, State#state{broker_mapping = NewBrokerMapping, pending = [],
+                            callbacks = NewCallbacks,
+                            known_topics = NewKnownTopics}}
   end,
   State#state{broker_mapping = BrokerMapping, known_topics = NewKnownTopics}.
 

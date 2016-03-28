@@ -106,7 +106,7 @@ do_request_metadata(Brokers, TCPOpts, Retries, RetryInterval, Request) ->
                      -1 -> -1;
                      N  -> N - 1
                    end,
-      do_request_metadata(Brokers, TCPOpts, NewRetries, RetryInterval, Request)
+      req_metadata(Brokers, TCPOpts, NewRetries, RetryInterval, Request)
   end.
 
 do_request_metadata([], _TCPOpts, _Request) ->
@@ -158,12 +158,12 @@ get_topic_mapping({BrokerMetadata, TopicMetadata}) ->
   Partitions = lists:flatten(lists:filtermap(fun expand_partitions/1, Topics)),
   % Converts the BrokerIds from the previous array into socket addresses
   lists:filtermap(fun({{Topic, Partition}, BrokerId}) ->
-    case lists:keyfind(BrokerId, 1, BrokerMetadata) of
-      {BrokerId, HostData} ->
-        {true, {{Topic, Partition, BrokerId}, HostData}};
-      _Any ->
-        false
-    end
+                    case lists:keyfind(BrokerId, 1, BrokerMetadata) of
+                      {BrokerId, HostData} ->
+                        {true, {{Topic, Partition, BrokerId}, HostData}};
+                      _Any ->
+                        false
+                    end
                   end, Partitions).
 
 expand_topic({?NO_ERROR, Topic, Partitions}) ->
