@@ -8,7 +8,7 @@
 -export([request_metadata/1, request_metadata/2, request_metadata/3,
          get_partitions/1]).
 % Produce
--export([send/3]).
+-export([send/1]).
 % Consume
 -export([fetch/4, stop_fetch/3]).
 % Common
@@ -37,17 +37,16 @@
 -record(state, {brokers               = [] :: [address()],
                 broker_mapping      = void :: [broker_mapping()] | void,
                 client_id           = <<>> :: kafkerl_protocol:client_id(),
-                max_metadata_retries  = -1 :: integer(),
-                retry_interval         = 1 :: non_neg_integer(),
                 config                = [] :: {atom(), any()},
                 autocreate_topics  = false :: boolean(),
                 callbacks             = [] :: [{filters(), kafkerl:callback()}],
                 known_topics          = [] :: [binary()],
-                pending               = [] :: [kafkerl:basic_message()],
-                last_metadata_request  = 0 :: integer(),
-                metadata_request_cd    = 0 :: integer(),
                 last_dump_name   = {"", 0} :: {string(), integer()},
-                default_fetch_options = [] :: kafkerl:options()}).
+                default_fetch_options = [] :: kafkerl:options(),
+                dump_location         = "" :: string(),
+                max_buffer_size        = 0 :: integer(),
+                save_bad_messages  = false :: boolean(),
+                metadata_handler    = void :: atom()}).
 -type state() :: #state{}.
 
 -export_type([address/0]).
@@ -57,23 +56,25 @@
 %%==============================================================================
 -spec start_link(atom(), any()) -> {ok, pid()} | ignore | kafkerl:error().
 start_link(Name, Config) ->
-  gen_server:start_link({local, Name}, ?MODULE, [Config], []).
+  gen_server:start_link({local, Name}, ?MODULE, [Config, Name], []).
 
--spec send(kafkerl:server_ref(), kafkerl:basic_message(), kafkerl:options()) ->
+-spec send(kafkerl:basic_message()) ->
   ok | kafkerl:error().
-send(ServerRef, {Topic, Partition, _Payload} = Message, Options) ->
+send({Topic, Partition, _Payload} = Message) ->
   Buffer = kafkerl_utils:buffer_name(Topic, Partition),
   case ets_buffer:write(Buffer, Message) of
     NewSize when is_integer(NewSize) ->
-      case lists:keyfind(buffer_size, 1, Options) of
-        {buffer_size, MaxSize} when NewSize > MaxSize ->
-          gen_server:call(ServerRef, {dump_buffer_to_disk, Buffer, Options});
-        _ ->
-          ok
-      end;
+      ok;
     Error ->
       _ = lager:debug("unable to write on ~p, reason: ~p", [Buffer, Error]),
-      gen_server:call(ServerRef, {send, Message})
+      case ets_buffer:write(kafkerl_utils:default_buffer_name(), Message) of
+        NewDefaultBufferSize when is_integer(NewDefaultBufferSize) -> 
+          ok;
+        _ ->
+          _ = lager:critical("unable to write to default buffer, reason: ~p",
+                             [Error]),
+          ok
+      end
   end.
 
 -spec fetch(kafkerl:server_ref(), kafkerl:topic(), kafkerl:partition(),
@@ -134,17 +135,6 @@ produce_succeeded(ServerRef, Messages) ->
 %%==============================================================================
 -spec handle_call(any(), any(), state()) -> {reply, ok, state()} |
                                             {reply, {error, any()}, state()}.
-handle_call({dump_buffer_to_disk, Buffer, Options}, _From, State) ->
-  {DumpNameStr, _} = DumpName = get_ets_dump_name(State#state.last_dump_name),
-  AllMessages = ets_buffer:read_all(Buffer),
-  FilePath = proplists:get_value(dump_location, Options, "") ++ DumpNameStr,
-  _ = case file:write_file(FilePath, term_to_binary(AllMessages)) of
-        ok    -> lager:debug("Dumped unsent messages at ~p", [FilePath]);
-        Error -> lager:critical("Unable to save messages, reason: ~p", [Error])
-      end,
-  {reply, ok, State#state{last_dump_name = DumpName}};
-handle_call({send, Message}, _From, State) ->
-  handle_send(Message, State);
 handle_call({fetch, Topic, Partition, Options}, _From, State) ->
   {reply, handle_fetch(Topic, Partition, Options, State), State};
 handle_call({stop_fetch, Topic, Partition}, _From, State) ->
@@ -170,6 +160,10 @@ handle_call({unsubscribe, Callback}, _From, State) ->
   NewCallbacks = lists:keydelete(Callback, 2, State#state.callbacks),
   {reply, ok, State#state{callbacks = NewCallbacks}}.
 
+-spec handle_info(any(), state()) -> {noreply, state()} |
+                                     {stop, {error, any()}, state()}.
+handle_info(dump_buffer_tick, State) ->
+  {noreply, handle_dump_buffer_to_disk(State)};
 handle_info(metadata_timeout, State) ->
   {stop, {error, unable_to_retrieve_metadata}, State};
 handle_info({metadata_updated, []}, State) ->
@@ -187,10 +181,8 @@ handle_info({metadata_updated, Mapping}, State) ->
   NewTopics = lists:sort([T || {T, _P} <- PartitionData]),
   NewKnownTopics = lists:umerge(NewTopics, State#state.known_topics),
   _ = lager:debug("Known topics: ~p", [NewKnownTopics]),
-  % Reverse the pending messages and try to send them again
-  RPending = lists:reverse(State#state.pending),
-  ok = lists:foreach(fun(P) -> send(self(), P, []) end, RPending),
-  {noreply, State#state{broker_mapping = NewBrokerMapping, pending = [],
+  % TODO: Maybe retry from the dumps
+  {noreply, State#state{broker_mapping = NewBrokerMapping,
                         callbacks = NewCallbacks,
                         known_topics = NewKnownTopics}};
 handle_info({'DOWN', Ref, process, _, normal}, State) ->
@@ -219,79 +211,48 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%==============================================================================
 %% Handlers
 %%==============================================================================
-init([Config]) ->
+init([Config, Name]) ->
+  % The schema indicates what is expected of the configuration, it validates and
+  % normalizes the configuration
   Schema = [{brokers, [{string, {integer, {1, 65535}}}], required},
-            {max_metadata_retries, {integer, {-1, undefined}}, {default, -1}},
             {client_id, binary, {default, <<"kafkerl_client">>}},
             {topics, [binary], required},
-            {metadata_tcp_timeout, positive_integer, {default, 1500}},
             {assume_autocreate_topics, boolean, {default, false}},
-            {metadata_request_cooldown, positive_integer, {default, 333}},
             {consumer_min_bytes, positive_integer, {default, 1}},
-            {consumer_max_wait, positive_integer, {default, 1500}}],
+            {consumer_max_wait, positive_integer, {default, 1500}},
+            {dump_location, string, {default, ""}},
+            {max_buffer_size, positive_integer, {default, 500}},
+            {save_messages_for_bad_topics, boolean, {default, true}},
+            {flush_to_disk_every, positive_integer, {default, 10000}}],
   case normalizerl:normalize_proplist(Schema, Config) of
-    {ok, [Brokers, MaxMetadataRetries, ClientId, Topics, RetryInterval,
-          AutocreateTopics, MetadataRequestCooldown, MinBytes, MaxWait]} ->
+    {ok, [Brokers, ClientId, Topics, AutocreateTopics, MinBytes, MaxWait,
+          DumpLocation, MaxBufferSize, SaveBadMessages, FlushToDiskInterval]} ->
+      % Start the metadata request handler
+      MetadataHandlerName = metadata_handler_name(Name),
+      {ok, _} = kafkerl_metadata_handler:start(MetadataHandlerName, Config),
+      % Build the default fetch options
       DefaultFetchOptions = [{min_bytes, MinBytes}, {max_wait, MaxWait}],
       State = #state{config                = Config,
                      known_topics          = Topics,
                      brokers               = Brokers,
                      client_id             = ClientId,
-                     retry_interval        = RetryInterval,
+                     dump_location         = DumpLocation,
+                     max_buffer_size       = MaxBufferSize,
+                     save_bad_messages     = SaveBadMessages,
                      autocreate_topics     = AutocreateTopics,
-                     max_metadata_retries  = MaxMetadataRetries,
-                     metadata_request_cd   = MetadataRequestCooldown,
-                     default_fetch_options = DefaultFetchOptions},
+                     default_fetch_options = DefaultFetchOptions,
+                     metadata_handler      = MetadataHandlerName},
+      % Create a buffer to hold unsent messages
+      _ = ets_buffer:create(kafkerl_utils:default_buffer_name(), fifo),
+      % Start the interval that manages the buffers holding unsent messages
+      {ok, _TRef} = timer:send_interval(FlushToDiskInterval, dump_buffer_tick),
       {_Pid, _Ref} = make_metadata_request(State),
       {ok, State};
     {errors, Errors} ->
-      lists:foreach(fun(E) ->
-                      _ = lager:critical("Connector config error ~p", [E])
-                    end, Errors),
+      ok = lists:foreach(fun(E) ->
+                           _ = lager:critical("Connector config error ~p", [E])
+                         end, Errors),
       {stop, bad_config}
-  end.
-
-handle_send(Message, State = #state{autocreate_topics = false}) ->
-  lager:critical("a.1 ~p", [Message]),
-  % The topic didn't exist, ignore
-  {Topic, _Partition, Payload} = Message,
-  _ = lager:error("Dropped ~p sent to non existing topic ~p", [Payload, Topic]),
-  {reply, {error, non_existing_topic}, State};
-handle_send(Message, State = #state{broker_mapping = void,
-                                    pending = Pending}) ->
-  lager:critical("b.1 ~p", [Message]),
-  % We should consider saving this to a new buffer instead of using the state.
-  {reply, ok, State#state{pending = [Message | Pending]}};
-handle_send(Message, State = #state{broker_mapping = Mapping, pending = Pending,
-                                    known_topics = KnownTopics}) ->
-  lager:critical("c.1 ~p", [Message]),
-  {Topic, Partition, Payload} = Message,
-  case lists:any(fun({K, _}) -> K =:= {Topic, Partition} end, Mapping) of
-    true ->
-      % The ets takes some time to be available after being created, so we check
-      % if the topic/partition pair is in the mapping and if it does, we know we
-      % just need to send it again. The order is not guaranteed in this case, so
-      % if that's a concern, don't rely on autocreate_topics (besides, don't use
-      % autocreate_topics on production since it opens another can of worms).
-      ok = send(self(), Message, []),
-      {reply, ok, State};
-    false ->
-      % However, if the topic/partition pair does not exist, we need to check if
-      % the topic exists. If the topic exists, we drop the message because kafka
-      % can't add partitions on the fly.
-      case lists:any(fun({{T, _}, _}) -> T =:= Topic end, Mapping) of
-        true ->
-          _ = lager:error("Dropped ~p sent to topic ~p, partition ~p",
-                          [Payload, Topic, Partition]),
-          {reply, {error, bad_partition}, State};
-        false ->
-          NewKnownTopics = lists:umerge([Topic], KnownTopics),
-          NewState = State#state{pending = [Message | Pending]},
-          lager:critical("X"),
-          R={reply, ok, handle_request_metadata(NewState, NewKnownTopics)},
-          lager:critical("X2"),
-          R
-      end
   end.
 
 handle_fetch(_Topic, _Partition, _Options, #state{broker_mapping = void}) ->
@@ -345,9 +306,76 @@ handle_request_metadata(State, NewTopics, _) ->
   State#state{broker_mapping = void, known_topics = NewKnownTopics,
               last_metadata_request = LastMetadataUpdate}.
 
+handle_dump_buffer_to_disk(State = #state{dump_location = DumpLocation,
+                                          last_dump_name = LastDumpName}) ->
+  % Get the buffer name and all the messages from it
+  Buffer = kafkerl_utils:default_buffer_name(),
+  MessagesInBuffer = ets_buffer:read_all(Buffer),
+  % Split them between the ones that should be retried and those that don't
+  {ToDump, ToRetry} = split_message_dump(MessagesInBuffer, State),
+  % Retry the messages on an async function (to avoid locking this gen_server)
+  ok = retry_messages(ToRetry),
+  % And dump the messages that need to be dumped into a file
+  case ToDump of
+    [_ | _] = Messages ->
+      % Get the name of the file we want to write to
+      {DumpNameStr, _} = NewDumpName = get_ets_dump_name(LastDumpName),
+      % Build the location
+      WorkingDirectory = case file:get_cwd() of
+                           {ok, Path} -> Path;
+                           {error, _} -> ""
+                         end,
+      FilePath = filename:join([WorkingDirectory, DumpLocation, DumpNameStr]),
+      % Write to disk
+      _ = case file:write_file(FilePath, term_to_binary(Messages)) of
+            ok ->
+              lager:info("Dumped unsent messages at ~p", [FilePath]);
+            Error ->
+              lager:critical("Unable to save messages, reason: ~p", [Error])
+          end,
+      State#state{last_dump_name = NewDumpName};
+    _ ->
+      State
+  end.
+
 %%==============================================================================
 %% Utils
 %%==============================================================================
+retry_messages([]) ->
+  ok;
+retry_messages(Messages) ->
+  _Pid = spawn(fun() -> [send(M) || M <- Messages] end),
+  ok.
+
+split_message_dump(Messages, #state{known_topics = KnownTopics,
+                                    max_buffer_size = MaxBufferSize,
+                                    save_bad_messages = SaveBadMessages})
+  when is_list(Messages) ->
+
+  % Split messages between for topics kafkerl knows exist and those that do not.
+  {Known, Unknown} = lists:partition(fun({Topic, _Partition, _Payload}) ->
+                                       lists:member(Topic, KnownTopics)
+                                     end, Messages),
+  % The messages to be dumped are those from unkown topics (if the settings call
+  % for it) and those from known topics if the buffer size is too large.
+  % The messages to be retried are those from the known topics, as long as their
+  % number does not exceed the MaxBufferSize.
+  case {SaveBadMessages, length(Known) >= MaxBufferSize} of
+    {true, true} ->
+      {Unknown ++ Known, []};
+    {false, true} ->
+      {Known, []};
+    {true, false} ->
+      {Unknown, Known};
+    {false, false} ->
+      {[], Known}
+  end;
+% If the messages are not a list, then it's an ets error, report it and move on.
+% And yes, those messages are gone forever
+split_message_dump(Error, _State) ->
+  lager:error("Unable to get messages from buffer, reason: ~p", [Error]),
+  {[], []}.
+
 get_ets_dump_name({OldName, Counter}) ->
   {{Year, Month, Day}, {Hour, Minute, Second}} = calendar:local_time(),
   Ts = io_lib:format("~4.10.0B~2.10.0B~2.10.0B~2.10.0B~2.10.0B~2.10.0B_",
@@ -355,9 +383,9 @@ get_ets_dump_name({OldName, Counter}) ->
   PartialNewName = "kafkerl_messages_" ++ lists:flatten(Ts),
   case lists:prefix(PartialNewName, OldName) of
     true ->
-      {PartialNewName ++ integer_to_list(Counter + 1) ++ ".dump", Counter + 1};
+      {PartialNewName ++ integer_to_list(Counter) ++ ".dump", Counter + 1};
     _ ->
-      {PartialNewName ++ "0.dump", 0}
+      {PartialNewName ++ "0.dump", 1}
   end.
 
 get_metadata_tcp_options() ->
@@ -429,6 +457,9 @@ send_event(Event, Callbacks) ->
   lists:filter(fun(Callback) ->
                  send_event(Event, Callback) =:= ok
                end, Callbacks).
+
+metadata_handler_name(ServerName) ->
+  list_to_binary([atom_to_list(ServerName), "_metadata_handler"]).
 
 %%==============================================================================
 %% Request building

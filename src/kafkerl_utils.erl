@@ -4,7 +4,7 @@
 -export([send_event/2, send_error/2]).
 -export([get_tcp_options/1]).
 -export([merge_messages/1, split_messages/1, valid_message/1]).
--export([buffer_name/2]).
+-export([buffer_name/2, default_buffer_name/0]).
 -export([gather_consume_responses/0, gather_consume_responses/1]).
 -export([proplists_set/2]).
 
@@ -73,6 +73,10 @@ valid_message(_Any) ->
 buffer_name(Topic, Partition) ->
   Bin = <<Topic/binary, $., (integer_to_binary(Partition))/binary, "_buffer">>,
   binary_to_atom(Bin, utf8).
+
+-spec default_buffer_name() -> atom().
+default_buffer_name() ->
+  default_message_buffer.
 
 -type proplist_value() :: {atom(), any()}.
 -type proplist()       :: [proplist_value].
