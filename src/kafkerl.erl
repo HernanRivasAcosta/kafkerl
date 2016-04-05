@@ -2,7 +2,7 @@
 -author('hernanrivasacosta@gmail.com').
 
 -export([start/0, start/2]).
--export([produce/3, produce/4, produce/5,
+-export([produce/3,
          consume/2, consume/3, consume/4, stop_consuming/2, stop_consuming/3,
          request_metadata/0, request_metadata/1, request_metadata/2,
          partitions/0, partitions/1]).
@@ -16,7 +16,6 @@
                       {atom(), atom()} |
                       {atom(), atom(), [any()]}.
 -type option()     :: {buffer_size, integer() | infinity} | 
-                      {dump_location, string()} | 
                       {consumer, callback()} |
                       {min_bytes, integer()} |
                       {max_wait, integer()} |
@@ -51,19 +50,8 @@ start(_StartType, _StartArgs) ->
 %% Produce API
 -spec produce(topic(), partition(), payload()) -> ok.
 produce(Topic, Partition, Message) ->
-  produce(?MODULE, Topic, Partition, Message, []).
-
--spec produce(server_ref(), topic(), partition(), payload()) -> ok;
-             (topic(), partition(), payload(), options()) -> ok.
-produce(Topic, Partition, Message, Options) when is_list(Options) ->
-  produce(?MODULE, {Topic, Partition, Message}, Options);
-produce(ServerRef, Topic, Partition, Message) ->
-  produce(ServerRef, {Topic, Partition, Message}, []).
-
--spec produce(server_ref(), topic(), partition(), payload(), options()) -> ok.
-produce(ServerRef, Topic, Partition, Message, Options) ->
-  kafkerl_connector:send(ServerRef, {Topic, Partition, Message}, Options).
-
+  kafkerl_connector:send({Topic, Partition, Message}).
+  
 %% Consume API
 -spec consume(topic(), partition()) -> ok | error().
 consume(Topic, Partition) ->
@@ -104,13 +92,13 @@ stop_consuming(ServerRef, Topic, Partition) ->
 request_metadata() ->
   request_metadata(?MODULE).
 
--spec request_metadata(atom() | [topic()]) -> ok.
+-spec request_metadata(server_ref() | [topic()]) -> ok.
 request_metadata(Topics) when is_list(Topics) ->
   request_metadata(?MODULE, Topics);
 request_metadata(ServerRef) ->
   kafkerl_connector:request_metadata(ServerRef).
 
--spec request_metadata(atom(), [topic()]) -> ok.
+-spec request_metadata(server_ref(), [topic()]) -> ok.
 request_metadata(ServerRef, Topics) ->
   kafkerl_connector:request_metadata(ServerRef, Topics).
 
