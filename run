@@ -1,0 +1,2 @@
+rebar3 release
+./_build/default/rel/kafkerl/bin/kafkerl console

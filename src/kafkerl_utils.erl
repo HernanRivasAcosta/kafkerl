@@ -3,8 +3,8 @@
 
 -export([send_event/2, send_error/2]).
 -export([get_tcp_options/1]).
--export([merge_messages/1, split_messages/1, valid_message/1]).
--export([buffer_name/2]).
+-export([merge_messages/1, split_messages/1]).
+-export([buffer_name/2, default_buffer_name/0]).
 -export([gather_consume_responses/0, gather_consume_responses/1]).
 -export([proplists_set/2]).
 
@@ -59,30 +59,22 @@ split_messages({Topic, Partitions}) ->
 split_messages(Topics) ->
   lists:flatten([split_messages(Topic) || Topic <- Topics]).
 
--spec valid_message(any()) -> boolean().
-valid_message({Topic, Partition, Messages}) ->
-  is_binary(Topic) andalso is_integer(Partition) andalso Partition >= 0 andalso
-  (is_binary(Messages) orelse is_list_of_binaries(Messages));
-valid_message({Topic, Partition}) ->
-  is_binary(Topic) andalso (is_partition(Partition) orelse
-                            is_partition_list(Partition));
-valid_message(L) when is_list(L) ->
-  lists:all(fun valid_message/1, L);
-valid_message(_Any) ->
-  false.
-
 -spec buffer_name(kafkerl_protocol:topic(), kafkerl_protocol:partition()) ->
   atom().
 buffer_name(Topic, Partition) ->
   Bin = <<Topic/binary, $., (integer_to_binary(Partition))/binary, "_buffer">>,
   binary_to_atom(Bin, utf8).
 
--type proplist_value() :: {atom(), any()}.
+-spec default_buffer_name() -> atom().
+default_buffer_name() ->
+  default_message_buffer.
+
+-type proplist_value() :: {atom(), any()} | atom().
 -type proplist()       :: [proplist_value].
 -spec proplists_set(proplist(), proplist_value() | [proplist_value()]) ->
   proplist().
 proplists_set(Proplist, {K, _V} = NewValue) ->
-  lists:keyreplace(K, 1, Proplist, NewValue);
+  lists:keystore(K, 1, proplists:unfold(Proplist), NewValue);
 proplists_set(Proplist, []) ->
   Proplist;
 proplists_set(Proplist, [H | T]) ->
@@ -133,22 +125,6 @@ merge_messages(A, B) ->
     {true, false}  -> [B | A];
     {false, false} -> [B, A]
   end.
-
-is_list_of_binaries(L) when is_list(L) ->
-  length(L) > 0 andalso lists:all(fun is_binary/1, L);
-is_list_of_binaries(_Any) ->
-  false.
-
-is_partition_list(L) when is_list(L) ->
-  length(L) > 0 andalso lists:all(fun is_partition/1, L);
-is_partition_list(_Any) ->
-  false.
-
-is_partition({Partition, Messages}) ->
-  is_integer(Partition) andalso Partition >= 0 andalso
-  (is_binary(Messages) orelse is_list_of_binaries(Messages));
-is_partition(_Any) ->
-  false.
 
 -spec gather_consume_responses() -> [] | {any(), any()}.
 gather_consume_responses() ->

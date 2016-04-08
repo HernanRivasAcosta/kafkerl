@@ -29,9 +29,8 @@ init([]) ->
   {ok, {{one_for_one, 5, 10}, ChildSpecs}}.
 
 get_connector_child_spec() ->
-  Name = application:get_env(kafkerl, gen_server_name, kafkerl),
   {ok, ConnConfig} = application:get_env(kafkerl, conn_config),
   Topics = application:get_env(kafkerl, topics, []),
-  Params = [Name, [{topics, Topics} | ConnConfig]],
+  Params = [[{topics, Topics} | ConnConfig]],
   MFA = {kafkerl_connector, start_link, Params},
-  {Name, MFA, permanent, 2000, worker, [kafkerl_connector]}.
+  {kafkerl, MFA, permanent, 2000, worker, [kafkerl_connector]}.
