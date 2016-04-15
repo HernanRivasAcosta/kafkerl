@@ -8,7 +8,7 @@
 % Only for internal use
 -export([connect/6]).
 % Supervisors
--export([start_link/4]).
+-export([start_link/3]).
 % gen_server callbacks
 -export([init/1, terminate/2, code_change/3,
          handle_call/3, handle_cast/2, handle_info/2]).
@@ -31,7 +31,6 @@
                 client_id  = undefined :: binary(),
                 socket     = undefined :: port(),
                 address    = undefined :: kafkerl_connector:address(),
-                connector  = undefined :: pid(),
                 tref       = undefined :: any(),
                 tcp_options       = [] :: [any()],
                 max_retries        = 0 :: integer(),
@@ -51,12 +50,12 @@
 %%==============================================================================
 %% API
 %%==============================================================================
--spec start_link(conn_idx(), pid(), kafkerl_connector:address(), any()) ->
+-spec start_link(conn_idx(), kafkerl_connector:address(), any()) ->
   start_link_response().
-start_link(Id, Connector, Address, Config) ->
+start_link(Id, Address, Config) ->
   NameStr = atom_to_list(?MODULE) ++ "_" ++ integer_to_list(Id),
   Name = list_to_atom(NameStr),
-  Params = [Id, Connector, Address, Config, Name],
+  Params = [Id, Address, Config, Name],
   case gen_server:start_link({local, Name}, ?MODULE, Params, []) of
     {ok, Pid} ->
       {ok, Name, Pid};
@@ -128,7 +127,7 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%==============================================================================
 %% Handlers
 %%==============================================================================
-init([Id, Connector, Address, Config, Name]) ->
+init([Id, Address, Config, Name]) ->
   Schema = [{tcp_options, [any], {default, []}},
             {retry_interval, positive_integer, {default, 1000}},
             {max_retries, positive_integer, {default, 3}},
@@ -137,13 +136,17 @@ init([Id, Connector, Address, Config, Name]) ->
   case normalizerl:normalize_proplist(Schema, Config) of
     {ok, [TCPOpts, RetryInterval, MaxRetries, ClientId, MaxTimeQueued]} ->
       NewTCPOpts = kafkerl_utils:get_tcp_options(TCPOpts),
-      EtsName = list_to_atom(atom_to_list(Name) ++ "_ets"),
-      ets:new(EtsName, [named_table, public, {write_concurrency, true},
-                        {read_concurrency, true}]),
-      State = #state{conn_idx = Id, tcp_options = NewTCPOpts, address = Address,
-                     max_retries = MaxRetries, retry_interval = RetryInterval,
-                     connector = Connector, client_id = ClientId, name = Name,
-                     max_time_queued = MaxTimeQueued, ets = EtsName},
+      Ets = list_to_atom(atom_to_list(Name) ++ "_ets"),
+      _ = ets:new(Ets, ets_options()),
+      State = #state{ets             = Ets,
+                     name            = Name,
+                     conn_idx        = Id,
+                     address         = Address,
+                     client_id       = ClientId,
+                     max_retries     = MaxRetries,
+                     tcp_options     = NewTCPOpts,
+                     retry_interval  = RetryInterval,
+                     max_time_queued = MaxTimeQueued},
       Params = [self(), Name, NewTCPOpts, Address, RetryInterval, MaxRetries],
       _Pid = spawn_link(?MODULE, connect, Params),
       {ok, _Tref} = queue_flush(MaxTimeQueued),
@@ -159,9 +162,8 @@ handle_flush(State = #state{socket = undefined}) ->
   {noreply, State};
 handle_flush(State = #state{buffers = []}) ->
   {noreply, State};
-handle_flush(State = #state{socket = Socket, ets = EtsName, buffers = Buffers,
-                            client_id = ClientId, connector = Connector,
-                            name = Name}) ->
+handle_flush(State = #state{ets = EtsName, socket = Socket, buffers = Buffers,
+                            name = Name, client_id = ClientId}) ->
   {ok, CorrelationId, NewState} = build_correlation_id(State),
   % TODO: Maybe buffer all this messages in case something goes wrong
   AllMessages = get_all_messages(Buffers),
@@ -180,7 +182,7 @@ handle_flush(State = #state{socket = Socket, ets = EtsName, buffers = Buffers,
                              [Name, Reason]),
           gen_tcp:close(Socket),
           ets:delete_all_objects(EtsName, CorrelationId),
-          ok = resend_messages(MergedMessages, Connector),
+          ok = resend_messages(MergedMessages),
           {noreply, handle_tcp_close(NewState)};
         ok ->
           _ = lager:debug("~p sent message ~p", [Name, CorrelationId]),
@@ -231,6 +233,7 @@ handle_fetch(ServerRef, Topic, Partition, Options,
                             server_ref = ServerRef,
                             topic = Topic,
                             partition = Partition,
+                            %options = [scheduled | Options]},
                             options = Options},
           NewScheduledFetches = case KeyTakeResult of
                                   false -> ScheduledFetches;
@@ -342,8 +345,7 @@ handle_fetch_response(Bin, Fetch,
       {ok, State#state{current_fetch = void, fetches = NewFetches}}
   end.
 
-handle_produce_response(Bin, State = #state{connector = Connector, name = Name,
-                                            ets = EtsName}) ->
+handle_produce_response(Bin, State = #state{name = Name, ets = EtsName}) ->
   case kafkerl_protocol:parse_produce_response(Bin) of
     {ok, CorrelationId, Topics} ->
       case ets:lookup(EtsName, CorrelationId) of
@@ -352,15 +354,15 @@ handle_produce_response(Bin, State = #state{connector = Connector, name = Name,
           {Errors, Successes} = split_errors_and_successes(Topics),
           % First, send the offsets and messages that were delivered
           _ = spawn(fun() ->
-                      notify_success(Successes, Messages, Connector)
+                      notify_success(Successes, Messages)
                     end),
           % Then handle the errors
           case handle_errors(Errors, Messages, Name) of
             ignore ->
               {ok, State};
             {request_metadata, MessagesToResend} ->
-              kafkerl_connector:request_metadata(Connector),
-              ok = resend_messages(MessagesToResend, Connector),
+              kafkerl_connector:request_metadata(),
+              ok = resend_messages(MessagesToResend),
               {ok, State}
           end;
         _ ->
@@ -376,18 +378,18 @@ handle_produce_response(Bin, State = #state{connector = Connector, name = Name,
 %%==============================================================================
 %% Utils
 %%==============================================================================
-resend_messages(Messages, Connector) ->
-  F = fun(M) -> kafkerl_connector:send(Connector, M, []) end,
+resend_messages(Messages) ->
+  F = fun(M) -> kafkerl_connector:send(M) end,
   lists:foreach(F, Messages).
 
-notify_success([], _Messages, _Pid) ->
+notify_success([], _Messages) ->
   ok;
-notify_success([{Topic, Partition, Offset} | T], Messages, Pid) ->
+notify_success([{Topic, Partition, Offset} | T], Messages) ->
   MergedMessages = kafkerl_utils:merge_messages(Messages),
   Partitions = partitions_in_topic(Topic, MergedMessages),
   M = messages_in_partition(Partition, Partitions),
-  kafkerl_connector:produce_succeeded(Pid, {Topic, Partition, M, Offset}),
-  notify_success(T, Messages, Pid).
+  kafkerl_connector:produce_succeeded({Topic, Partition, M, Offset}),
+  notify_success(T, Messages).
   
 partitions_in_topic(Topic, Messages) ->
   lists:flatten([P || {T, P} <- Messages, T =:= Topic]).
@@ -529,3 +531,6 @@ send_messages(Consumer, [Event | T]) ->
   end;
 send_messages(Consumer, Event) ->
   kafkerl_utils:send_event(Consumer, Event).
+
+ets_options() ->
+  [named_table, public, {write_concurrency, true}, {read_concurrency, true}].
