@@ -78,12 +78,12 @@ buffer_name(Topic, Partition) ->
 default_buffer_name() ->
   default_message_buffer.
 
--type proplist_value() :: {atom(), any()}.
+-type proplist_value() :: {atom(), any()} | atom().
 -type proplist()       :: [proplist_value].
 -spec proplists_set(proplist(), proplist_value() | [proplist_value()]) ->
   proplist().
 proplists_set(Proplist, {K, _V} = NewValue) ->
-  lists:keyreplace(K, 1, Proplist, NewValue);
+  lists:keystore(K, 1, proplists:unfold(Proplist), NewValue);
 proplists_set(Proplist, []) ->
   Proplist;
 proplists_set(Proplist, [H | T]) ->
