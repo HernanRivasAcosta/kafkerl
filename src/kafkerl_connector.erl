@@ -61,13 +61,14 @@ send({Topic, Partition, _Payload} = Message) ->
     NewSize when is_integer(NewSize) ->
       ok;
     Error ->
-      _ = lager:debug("unable to write on ~p, reason: ~p", [Buffer, Error]),
+      _ = lager:debug("error writing on ~p, reason: ~p", [Buffer, Error]),
       case ets_buffer:write(kafkerl_utils:default_buffer_name(), Message) of
         NewDefaultBufferSize when is_integer(NewDefaultBufferSize) -> 
           ok;
         _ ->
-          _ = lager:critical("unable to write to default buffer, reason: ~p",
-                             [Error]),
+          _ = lager:critical("unable to write to default buffer, the message ~p"
+                             " was lost lost, reason: ~p",
+                             [Message, Error]),
           ok
       end
   end.
