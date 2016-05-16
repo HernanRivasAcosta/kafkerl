@@ -53,23 +53,26 @@
 start_link(Config) ->
   gen_server:start_link({local, kafkerl}, ?MODULE, [Config], []).
 
--spec send(kafkerl:basic_message()) ->
-  ok | kafkerl:error().
+-spec send(kafkerl:basic_message()) -> kafkerl:ok() | kafkerl:error().
 send({Topic, Partition, _Payload} = Message) ->
   Buffer = kafkerl_utils:buffer_name(Topic, Partition),
   case ets_buffer:write(Buffer, Message) of
     NewSize when is_integer(NewSize) ->
-      ok;
+      % Return 'saved' when the message went to the right ETS
+      {ok, saved};
     Error ->
       _ = lager:debug("error writing on ~p, reason: ~p", [Buffer, Error]),
       case ets_buffer:write(kafkerl_utils:default_buffer_name(), Message) of
-        NewDefaultBufferSize when is_integer(NewDefaultBufferSize) -> 
-          ok;
+        NewDefaultBufferSize when is_integer(NewDefaultBufferSize) ->
+          % We return 'cached' when we needed to use the default ets table
+          {ok, cached};
         _ ->
           _ = lager:critical("unable to write to default buffer, the message ~p"
                              " was lost lost, reason: ~p",
                              [Message, Error]),
-          ok
+          % We can safely assume that the ets existance indicates if kafkerl was
+          % started
+          {error, not_started}
       end
   end.
 

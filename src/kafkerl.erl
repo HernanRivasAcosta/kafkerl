@@ -24,6 +24,7 @@
 -type options()    :: [option()].
 -type server_ref() :: atom() | pid().
 
+-type ok()    :: {ok, atom()}.
 -type error() :: {error, atom() | {atom(), any()}}.
 
 -type topic()     :: binary().
@@ -48,7 +49,7 @@ start(_StartType, _StartArgs) ->
 %% Access API
 %%==============================================================================
 %% Produce API
--spec produce(topic(), partition(), payload()) -> ok.
+-spec produce(topic(), partition(), payload()) -> ok() | error().
 produce(Topic, Partition, Message) ->
   kafkerl_connector:send({Topic, Partition, Message}).
   
