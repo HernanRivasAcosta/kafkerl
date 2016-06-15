@@ -3,7 +3,7 @@
 
 -export([send_event/2, send_error/2]).
 -export([get_tcp_options/1]).
--export([merge_messages/1, split_messages/1, valid_message/1]).
+-export([merge_messages/1, split_messages/1]).
 -export([buffer_name/2, default_buffer_name/0]).
 -export([gather_consume_responses/0, gather_consume_responses/1]).
 -export([proplists_set/2]).
@@ -55,18 +55,6 @@ split_messages({Topic, Partitions}) ->
   [{Topic, Partition, Messages} || {Partition, Messages} <- Partitions];
 split_messages(Topics) ->
   lists:flatten([split_messages(Topic) || Topic <- Topics]).
-
--spec valid_message(any()) -> boolean().
-valid_message({Topic, Partition, Messages}) ->
-  is_binary(Topic) andalso is_integer(Partition) andalso Partition >= 0 andalso
-  (is_binary(Messages) orelse is_list_of_binaries(Messages));
-valid_message({Topic, Partition}) ->
-  is_binary(Topic) andalso (is_partition(Partition) orelse
-                            is_partition_list(Partition));
-valid_message(L) when is_list(L) ->
-  lists:all(fun valid_message/1, L);
-valid_message(_Any) ->
-  false.
 
 -spec buffer_name(kafkerl_protocol:topic(), kafkerl_protocol:partition()) ->
   atom().
