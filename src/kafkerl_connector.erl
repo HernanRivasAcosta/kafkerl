@@ -28,15 +28,14 @@
 -type kafler_port() :: 1..65535.
 -type address()     :: {kafler_host(), kafler_port()}.
 
--type filters()     :: all | [atom()].
-
 -type broker_mapping_key()  :: {kafkerl:topic(), kafkerl:partition()}.
 -type broker_mapping()      :: {broker_mapping_key(), kafkerl:server_ref()}.
 
 -record(state, {broker_mapping      = void :: [broker_mapping()] | void,
                 config                = [] :: [{atom(), any()}],
                 autocreate_topics  = false :: boolean(),
-                callbacks             = [] :: [{filters(), kafkerl:callback()}],
+                callbacks             = [] :: [{kafkerl:filters(),
+                                                kafkerl:callback()}],
                 last_dump_name   = {"", 0} :: {string(), integer()},
                 default_fetch_options = [] :: kafkerl:options(),
                 dump_location         = "" :: string(),
@@ -98,9 +97,9 @@ get_partitions() ->
 -spec subscribe(kafkerl:callback()) -> ok | kafkerl:error().
 subscribe(Callback) ->
   subscribe(Callback, all).
--spec subscribe(kafkerl:callback(), filters()) -> ok | kafkerl:error().
-subscribe(Callback, Filter) ->
-  gen_server:call(kafkerl, {subscribe, {Filter, Callback}}).
+-spec subscribe(kafkerl:callback(), kafkerl:filters()) -> ok | kafkerl:error().
+subscribe(Callback, Filters) ->
+  gen_server:call(kafkerl, {subscribe, {Filters, Callback}}).
 
 -spec unsubscribe(kafkerl:callback()) -> ok.
 unsubscribe(Callback) ->
