@@ -1,6 +1,6 @@
 {application, kafkerl,
  [{description, []},
-  {vsn, "1"},
+  {vsn, "1.0"},
   {registered, []},
   {applications, [kernel, stdlib]},
   {mod, {kafkerl, []}},
