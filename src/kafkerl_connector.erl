@@ -207,7 +207,7 @@ init([Config]) ->
                      autocreate_topics     = AutocreateTopics,
                      default_fetch_options = DefaultFetchOptions},
       % Create a buffer to hold unsent messages
-      _ = ets_buffer:create(kafkerl_utils:default_buffer_name(), fifo),
+      _ = kafkerl_buffer:create_buffer(kafkerl_utils:default_buffer_name(), fifo),
       % Start the interval that manages the buffers holding unsent messages
       {ok, _TRef} = timer:send_interval(FlushToDiskInterval, dump_buffer_tick),
       ok = kafkerl_metadata_handler:request_metadata([]),

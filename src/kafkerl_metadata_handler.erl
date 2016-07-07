@@ -22,7 +22,9 @@
                 retry_interval      = 1 :: non_neg_integer(),
                 cooldown            = 0 :: integer(),
                 known_topics       = [] :: [kafkerl:topic()],
-                next_topics        = [] :: [kafkerl:topic()]}).
+                next_topics        = [] :: [kafkerl:topic()],
+                broker_connections = [],
+                connection_index   = 0}).
 -type state() :: #state{}.
 
 %%==============================================================================
@@ -70,10 +72,14 @@ requesting({request, NewTopics}, State = #state{known_topics = KnownTopics}) ->
 % Handle the updated metadata
 requesting({metadata_updated, RawMapping}, State) ->
   % Create the topic mapping (this also starts the broker connections)
-  NewMapping = get_broker_mapping(RawMapping, State),
-  _ = lager:debug("Refreshed topic mapping: ~p", [NewMapping]),
-  ok = kafkerl_connector:topic_mapping_updated(NewMapping),
-  {next_state, idle, State};
+    {N, TopicMapping} = get_broker_mapping(RawMapping, State),
+    _ = lager:debug("Refreshed topic mapping: ~p", [TopicMapping]),
+
+    NewMapping2 = [{{Topic, Partition}, Conn} ||
+                    {_ConnId, {Topic, Partition}, Conn} <- TopicMapping],
+    _ = lager:debug("Refreshed topic mapping: ~p", [NewMapping2]),
+  ok = kafkerl_connector:topic_mapping_updated(NewMapping2),
+  {next_state, idle, State#state{connection_index = N, broker_connections = TopicMapping}};
 % If we have no more retries left, go on cooldown
 requesting({metadata_retry, 0}, State = #state{cooldown = Cooldown}) ->
   Params = [?MODULE, on_timer],
@@ -105,9 +111,18 @@ handle_sync_event(get_known_topics, _From, StateName, State) ->
 %% gen_fsm boilerplate
 %%==============================================================================
 -spec handle_info(any(), atom(), state()) -> {next_state, atom(), state()}.
+handle_info({'EXIT', Pid, Reason}, StateName, State) ->
+    lager:info("process ~p crashed with reason ~p ", [Pid, Reason]),
+    BrokerConnections = [{Name, {Topic, Partition}, Conn} || {Name, {Topic, Partition}, Conn} <- State#state.broker_connections,
+        whereis(Conn) /= Pid, whereis(Conn) /= undefined],
+    lager:info("current connections ~p, updated connections ~p ~n", [State#state.broker_connections, BrokerConnections]),
+    timer:apply_after(1000, ?MODULE, request_metadata, [[]]),
+    {next_state, StateName, State#state{broker_connections = BrokerConnections}};
+
 handle_info(Message, StateName, State) ->
-  lager:info("received unexpected message ~p", [Message]),
-  {next_state, StateName, State}.
+    lager:info("received unexpected message ~p", [Message]),
+    {next_state, StateName, State}.
+
 
 -spec code_change(any(), atom(), state(), any()) -> {ok, atom(), state()}.
 code_change(_OldVsn, StateName, StateData, _Extra) ->
@@ -145,6 +160,7 @@ init([Config]) ->
                      client_id      = ClientId,
                      max_retries    = MaxRetries,
                      retry_interval = RetryInterval},
+      process_flag(trap_exit, true),
       {ok, idle, State};
     {errors, Errors} ->
       ok = lists:foreach(fun(E) ->
@@ -290,14 +306,15 @@ expand_partitions({Topic, [{Error, Partition, _, _, _} | T]}, Acc) ->
   expand_partitions({Topic, T}, Acc).
 
 get_broker_mapping(TopicMapping, State) ->
-  get_broker_mapping(TopicMapping, State, 0, []).
+  get_broker_mapping(TopicMapping, State, State#state.connection_index,
+      State#state.broker_connections).
 
-get_broker_mapping([], _State, _N, Acc) ->
-  [{Key, Address} || {_ConnId, Key, Address} <- Acc];
+get_broker_mapping([], _State, N, Acc) ->
+    {N, lists:usort(Acc)};
 get_broker_mapping([{{Topic, Partition, ConnId}, Address} | T],
                    State = #state{config = Config}, N, Acc) ->
   Buffer = kafkerl_utils:buffer_name(Topic, Partition),
-  _ = ets_buffer:create(Buffer, fifo),
+  _ = kafkerl_buffer:create_buffer(Buffer, fifo),
   {Conn, NewN} = case lists:keyfind(ConnId, 1, Acc) of
                    false ->
                      {start_broker_connection(N, Address, Config), N + 1};
@@ -306,7 +323,7 @@ get_broker_mapping([{{Topic, Partition, ConnId}, Address} | T],
                  end,
 
   Buffer = kafkerl_utils:buffer_name(Topic, Partition),
-  _ = ets_buffer:create(Buffer, fifo),
+  _ = kafkerl_buffer:create_buffer(Buffer, fifo),
   kafkerl_broker_connection:add_buffer(Conn, Buffer),
 
   NewMapping = {ConnId, {Topic, Partition}, Conn},
