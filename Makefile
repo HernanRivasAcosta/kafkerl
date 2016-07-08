@@ -1,7 +1,7 @@
 COOKIE ?= KAFKERL-EXAMPLE
 CONFIG ?= rel/kafkerl.app.config
 ERL ?= erl
-RUN := ${ERL} -pa ebin -pa deps/*/ebin -smp enable -s lager -setcookie ${COOKIE} -config ${CONFIG} -boot start_sasl ${ERL_ARGS}
+RUN := ${ERL} -pa ebin -pa deps/*/ebin -smp enable -s lager -s kafkerl -setcookie ${COOKIE} -config ${CONFIG} -boot start_sasl ${ERL_ARGS}
 NODE ?= kafkerl
 CT_ARGS ?= "-vvv"
 ERLARGS=-config ${CONFIG}

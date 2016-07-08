@@ -196,7 +196,7 @@ build_produce_request({Topic, Partition, Messages}, Compression) ->
   {Size, MessageSet} = build_message_set(Messages, Compression),
   {Size + TopicSize + 24,
    [<<-1:?SHORT,
-      -1:?INT, % Timeout
+      -1:?INT, % Timeout %% TODO: get timeout error from kafka when this values is set to -1, after changing it to 1000, error disappers. need to double check if this value is updated in latest kafka protocol
       1:?UINT,  % TopicCount
       TopicSize:?USHORT>>,
     Topic,
