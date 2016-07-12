@@ -5,13 +5,12 @@
 
 -export([start_link/0, init/1]).
 
--include("kafkerl.hrl").
-
 -define(SERVER, ?MODULE).
 
 -type restart_strategy() :: {supervisor:strategy(),
                              non_neg_integer(),
                              non_neg_integer()}.
+-define(CHILD(__Name, __Mod, __Args), {__Name, {__Mod, start_link, __Args}, permanent, 2000, worker, [__Mod]}).
 
 %%==============================================================================
 %% API
@@ -30,14 +29,15 @@ init([]) ->
                    lager:notice("Kafkerl is disabled, ignoring"),
                    [];
                  false ->
-                   [get_connector_child_spec()]
+                   [?CHILD(kafkerl_buffer, kafkerl_buffer, []),
+                       get_connector_child_spec()]
                end,
   {ok, {{one_for_one, 5, 10}, ChildSpecs}}.
 
+
 get_connector_child_spec() ->
-  Name = application:get_env(kafkerl, gen_server_name, kafkerl),
   {ok, ConnConfig} = application:get_env(kafkerl, conn_config),
   Topics = application:get_env(kafkerl, topics, []),
-  Params = [Name, [{topics, Topics} | ConnConfig]],
+  Params = [[{topics, Topics} | ConnConfig]],
   MFA = {kafkerl_connector, start_link, Params},
-  {Name, MFA, permanent, 2000, worker, [kafkerl_connector]}.
+    {kafkerl, MFA, permanent, 2000, worker, [kafkerl_connector]}.

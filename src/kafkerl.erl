@@ -2,24 +2,40 @@
 -author('hernanrivasacosta@gmail.com').
 
 -export([start/0, start/2]).
--export([version/0,
-         produce/1, produce/2, produce_messages_from_file/1,
-         produce_messages_from_file/2, produce_messages_from_file/3,
-         get_partitions/0, get_partitions/1,
-         subscribe/1, subscribe/2, subscribe/3,
-         unsubscribe/1, unsubscribe/2,
-         request_metadata/0, request_metadata/1, request_metadata/2,
-         valid_message/1]).
-
--include("kafkerl.hrl").
--include("kafkerl_consumers.hrl").
+-export([produce/3,
+         consume/2, consume/3, stop_consuming/2,
+         request_metadata/0, request_metadata/1,
+         partitions/0,
+         subscribe/1, subscribe/2, unsubscribe/1]).
+-export([version/0]).
 
 %% Types
--type produce_option()  :: {buffer_size, integer() | infinity} | 
-                           {dump_location, string()}.
--type produce_options() :: [produce_option()].
+-type offset()     :: integer().
 
--export_type([produce_options/0]).
+-type callback()   :: pid() |
+                      fun() | 
+                      {atom(), atom()} |
+                      {atom(), atom(), [any()]}.
+-type filters()    :: all | [atom()].
+-type option()     :: {buffer_size, integer() | infinity} | 
+                      {consumer, callback()} |
+                      {min_bytes, integer()} |
+                      {max_wait, integer()} |
+                      {offset, offset()} |
+                      {fetch_interval, false | integer()}.
+-type options()    :: [option()].
+-type server_ref() :: atom() | pid().
+
+-type ok()    :: {ok, atom()}.
+-type error() :: {error, atom() | {atom(), any()}}.
+
+-type topic()     :: binary().
+-type partition() :: integer().
+-type payload()   :: binary() | [binary()].
+-type basic_message()   :: {topic(), partition(), payload()}.
+
+-export_type([server_ref/0, error/0, options/0, topic/0, partition/0, payload/0,
+              callback/0, basic_message/0, filters/0]).
 
 %%==============================================================================
 %% API
@@ -34,79 +50,64 @@ start(_StartType, _StartArgs) ->
 %%==============================================================================
 %% Access API
 %%==============================================================================
--spec version() -> {integer(), integer(), integer()}.
-version() ->
-  {1, 1, 2}.
+%% Produce API
+-spec produce(topic(), partition(), payload()) -> ok() | error().
+produce(Topic, Partition, Message) ->
+  kafkerl_connector:send({Topic, Partition, Message}).
+  
+%% Consume API
+-spec consume(topic(), partition()) -> {[payload()], offset()} | error().
+consume(Topic, Partition) ->
+  consume(Topic, Partition, []).
 
--spec produce(basic_message()) -> ok.
-produce(Message) ->
-  produce(?MODULE, Message).
--spec produce(atom(), basic_message()) -> ok;
-             (basic_message(), produce_options()) -> ok.
-produce(Message, Options) when is_tuple(Message) ->
-  produce(?MODULE, Message, Options);
-produce(Name, Message) ->
-  produce(Name, Message, []).
--spec produce(atom(), basic_message(), produce_options()) -> ok.
-produce(Name, Message, Options) ->
-  kafkerl_connector:send(Name, Message, Options).
+-spec consume(topic(), partition(), options()) -> ok |
+                                                  {[payload()], offset()} |
+                                                  error().
+consume(Topic, Partition, Options) ->
+  case {proplists:get_value(consumer, Options, undefined),
+        proplists:get_value(fetch_interval, Options, false)} of
+    {undefined, false} ->
+      NewOptions = [{consumer, self()} | Options],
+      kafkerl_connector:fetch(Topic, Partition, NewOptions),
+      kafkerl_utils:gather_consume_responses();
+    {undefined, _} ->
+      {error, fetch_interval_specified_with_no_consumer};
+    _ ->
+      kafkerl_connector:fetch(Topic, Partition, Options)
+  end.
 
--spec produce_messages_from_file(string()) -> ok.
-produce_messages_from_file(Filename) ->
-  produce_messages_from_file(?MODULE, Filename).
--spec produce_messages_from_file(atom(), basic_message()) -> ok;
-                                (string(), produce_options()) -> ok.
-produce_messages_from_file(Filename, Options) when is_list(Filename) ->
-  produce_messages_from_file(?MODULE, Filename, Options);
-produce_messages_from_file(Name, Filename) ->
-  produce_messages_from_file(Name, Filename, []).
--spec produce_messages_from_file(atom(), string(), produce_options()) -> ok.
-produce_messages_from_file(Name, Filename, Options) ->
-  {ok, Bin} = file:read_file(Filename),
-  Messages = binary_to_term(Bin),
-  [produce(Name, M, Options) || M <- Messages],
-  ok.
+-spec stop_consuming(topic(), partition()) -> ok.
+stop_consuming(Topic, Partition) ->
+  kafkerl_connector:stop_fetch(Topic, Partition).
 
--spec get_partitions() -> [{topic(), [partition()]}] | error().
-get_partitions() ->
-  get_partitions(?MODULE).
--spec get_partitions(atom()) -> [{topic(), [partition()]}] | error().
-get_partitions(Name) ->
-  kafkerl_connector:get_partitions(Name).
+%% Metadata API
+-spec request_metadata() -> ok.
+request_metadata() ->
+  request_metadata([]).
 
--spec subscribe(callback()) -> ok.
+-spec request_metadata([topic()]) -> ok.
+request_metadata(Topics) when is_list(Topics) ->
+  kafkerl_connector:request_metadata(Topics).
+
+%% Partitions
+-spec partitions() -> [{topic(), [partition()]}] | error().
+partitions() ->
+  kafkerl_connector:get_partitions().
+
+%% Events
+-spec subscribe(callback()) -> ok | error().
 subscribe(Callback) ->
-  subscribe(?MODULE, Callback).
--spec subscribe(atom(), callback()) -> ok.
-subscribe(Callback, all = Filter) ->
-  subscribe(?MODULE, Callback, Filter);
-subscribe(Callback, Filter) when is_list(Filter) ->
-  subscribe(?MODULE, Callback, Filter);
-subscribe(Name, Callback) ->
-  subscribe(Name, Callback, all).
--spec subscribe(atom(), callback(), filters()) -> ok.
-subscribe(Name, Callback, Filter) ->
-  kafkerl_connector:subscribe(Name, Callback, Filter).
+  kafkerl_connector:subscribe(Callback).
+
+-spec subscribe(callback(), filters()) -> ok | error().
+subscribe(Callback, Filters) ->
+  kafkerl_connector:subscribe(Callback, Filters).
 
 -spec unsubscribe(callback()) -> ok.
 unsubscribe(Callback) ->
-  unsubscribe(?MODULE, Callback).
--spec unsubscribe(atom(), callback()) -> ok.
-unsubscribe(Name, Callback) ->
-  kafkerl_connector:unsubscribe(Name, Callback).
+  kafkerl_connector:unsubscribe(Callback).
 
--spec request_metadata() -> ok.
-request_metadata() ->
-  request_metadata(?MODULE).
--spec request_metadata(atom() | [topic()]) -> ok.
-request_metadata(Name) when is_atom(Name) ->
-  kafkerl_connector:request_metadata(Name);
-request_metadata(Topics) ->
-  request_metadata(?MODULE, Topics).
--spec request_metadata(atom(), [topic()]) -> ok.
-request_metadata(Name, Topics) ->
-  kafkerl_connector:request_metadata(Name, Topics).
-
--spec valid_message(any()) -> boolean().
-valid_message(Any) ->
-  kafkerl_utils:valid_message(Any).
+%% Utils
+-spec version() -> {integer(), integer(), integer()}.
+version() ->
+  {3, 0, 0}.
