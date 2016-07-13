@@ -5,7 +5,7 @@
 -export([produce/3,
          consume/2, consume/3, stop_consuming/2,
          request_metadata/0, request_metadata/1,
-         partitions/0,
+         partitions/0, get_dump_files/0,
          subscribe/1, subscribe/2, unsubscribe/1]).
 -export([version/0]).
 
@@ -79,6 +79,10 @@ consume(Topic, Partition, Options) ->
 -spec stop_consuming(topic(), partition()) -> ok.
 stop_consuming(Topic, Partition) ->
   kafkerl_connector:stop_fetch(Topic, Partition).
+
+-spec get_dump_files() -> {ok, [any()]} | any(). 
+get_dump_files() ->
+    kafkerl_connector:get_dump_files().
 
 %% Metadata API
 -spec request_metadata() -> ok.
