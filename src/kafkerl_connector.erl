@@ -18,6 +18,8 @@
 -export([topic_mapping_updated/1]).
 % Supervisors
 -export([start_link/1]).
+
+-export([get_dump_files/0]).
 % gen_server callbacks
 -export([init/1, terminate/2, code_change/3,
          handle_call/3, handle_cast/2, handle_info/2]).
@@ -93,6 +95,9 @@ get_partitions() ->
     Error ->
       Error
   end.
+-spec get_dump_files() -> {ok, any()} | {error, any()}.
+get_dump_files() ->
+    gen_server:call(kafkerl, get_dump_files).
 
 -spec subscribe(kafkerl:callback()) -> ok | kafkerl:error().
 subscribe(Callback) ->
@@ -144,7 +149,21 @@ handle_call({subscribe, Callback}, _From, State) ->
   end;
 handle_call({unsubscribe, Callback}, _From, State) ->
   NewCallbacks = lists:keydelete(Callback, 2, State#state.callbacks),
-  {reply, ok, State#state{callbacks = NewCallbacks}}.
+  {reply, ok, State#state{callbacks = NewCallbacks}};
+
+handle_call(get_dump_files, _From, State) ->
+    DumpLocation = State#state.dump_location,
+    WorkingDirectory = case file:get_cwd() of
+                           {ok, Path} -> Path;
+                           {error, _} -> ""
+                       end,
+    FilePath = filename:join([WorkingDirectory, DumpLocation]),
+    case file:list_dir(FilePath) of
+        {ok, Filenames} ->
+            {reply, {ok, [FilePath ++ F || F <- Filenames, lists:suffix(".dump", F)]}, State};
+        Error ->
+            {reply, Error, State}
+    end.
 
 -spec handle_info(any(), state()) -> {noreply, state()} |
                                      {stop, {error, any()}, state()}.
