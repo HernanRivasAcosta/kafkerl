@@ -28,6 +28,7 @@
     connection_index = 0 :: non_neg_integer()}).
 -type state() :: #state{}.
 
+-define(METADATA_REFRESH_INTERVAL, 60000).
 %%==============================================================================
 %% API
 %%==============================================================================
@@ -76,13 +77,21 @@ requesting({metadata_updated, RawMapping}, State) ->
     {N, TopicMapping} = get_broker_mapping(RawMapping, State),
     OldMapping = State#state.broker_connections,
     %%OldMapping -- TopicMapping =/= [] andalso
-    lager:warning("sync broker mappings old ~p new ~p",
+    lager:info("sync broker mappings old ~p new ~p",
         [OldMapping, TopicMapping]),
     NewMapping2 = [{{Topic, Partition}, Conn} ||
         {_ConnId, {Topic, Partition}, Conn} <- TopicMapping],
     lager:debug("Refreshed topic mapping: ~p", [NewMapping2]),
-    ok = kafkerl_connector:topic_mapping_updated(NewMapping2),
-    {next_state, idle, State#state{connection_index = N, broker_connections = TopicMapping}};
+    (TopicMapping /= OldMapping) orelse
+        kafkerl_connector:topic_mapping_updated(NewMapping2),
+    Topics = lists:usort([Topic ||
+        {_ConnId, {Topic, _Partition}, _Conn} <- TopicMapping]),
+    KnownTopics = State#state.known_topics,
+    NewState = State#state{connection_index = N,
+        known_topics = lists:umerge(KnownTopics, Topics),
+        broker_connections = TopicMapping},
+    timer:apply_after(?METADATA_REFRESH_INTERVAL, ?MODULE, request_metadata, [[]]),
+    {next_state, idle, NewState};
 % If we have no more retries left, go on cooldown
 requesting({metadata_retry, 0}, State = #state{cooldown = Cooldown}) ->
     Params = [?MODULE, on_timer],
@@ -118,7 +127,7 @@ handle_info({'EXIT', Pid, Reason}, StateName, State) ->
     lager:info("process ~p crashed with reason ~p ", [Pid, Reason]),
     BrokerConnections = [{Name, {Topic, Partition}, Conn} || {Name, {Topic, Partition}, Conn} <- State#state.broker_connections,
         whereis(Conn) /= Pid, whereis(Conn) /= undefined],
-    lager:info("current connections ~p, updated connections ~p ~n", [State#state.broker_connections, BrokerConnections]),
+    lager:debug("current connections ~p, updated connections ~p ~n", [State#state.broker_connections, BrokerConnections]),
     timer:apply_after(1000, ?MODULE, request_metadata, [[]]),
     {next_state, StateName, State#state{broker_connections = BrokerConnections}};
 
@@ -252,12 +261,8 @@ log_metadata_request_error(Host, Port, Reason) ->
     _ = lager:warning("Unable to retrieve metadata from ~s:~p, reason: ~p",
         [Host, Port, Reason]).
 
-metadata_request(#state{client_id = ClientId}, [] = _NewTopics) ->
-    kafkerl_protocol:build_metadata_request([], 0, ClientId);
-metadata_request(#state{known_topics = KnownTopics, client_id = ClientId},
-    NewTopics) ->
-    AllTopics = lists:umerge(KnownTopics, NewTopics),
-    kafkerl_protocol:build_metadata_request(AllTopics, 0, ClientId).
+metadata_request(#state{client_id = ClientId}, _NewTopics) ->
+    kafkerl_protocol:build_metadata_request([], 0, ClientId).
 
 %%==============================================================================
 %% Topic/broker mapping

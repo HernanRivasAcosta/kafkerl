@@ -20,6 +20,7 @@
 -export([start_link/1]).
 
 -export([get_dump_files/0]).
+-export([produce_messages_from_file/1]).
 % gen_server callbacks
 -export([init/1, terminate/2, code_change/3,
          handle_call/3, handle_cast/2, handle_info/2]).
@@ -33,7 +34,7 @@
 -type broker_mapping_key()  :: {kafkerl:topic(), kafkerl:partition()}.
 -type broker_mapping()      :: {broker_mapping_key(), kafkerl:server_ref()}.
 
--record(state, {broker_mapping      = void :: [broker_mapping()] | void,
+-record(state, {broker_mapping      = [] :: [broker_mapping()] | void,
                 config                = [] :: [{atom(), any()}],
                 autocreate_topics  = false :: boolean(),
                 callbacks             = [] :: [{kafkerl:filters(),
@@ -99,6 +100,9 @@ get_partitions() ->
 get_dump_files() ->
     gen_server:call(kafkerl, get_dump_files).
 
+produce_messages_from_file(File) ->
+    gen_server:call(kafkerl, {produce_messages_from_file, File}).
+
 -spec subscribe(kafkerl:callback()) -> ok | kafkerl:error().
 subscribe(Callback) ->
   subscribe(Callback, all).
@@ -160,10 +164,13 @@ handle_call(get_dump_files, _From, State) ->
     FilePath = filename:join([WorkingDirectory, DumpLocation]),
     case file:list_dir(FilePath) of
         {ok, Filenames} ->
-            {reply, {ok, [FilePath ++ F || F <- Filenames, lists:suffix(".dump", F)]}, State};
+            {reply, {ok, [filename:join([FilePath, F]) || F <- Filenames, lists:suffix(".dump", F)]}, State};
         Error ->
             {reply, Error, State}
-    end.
+    end;
+handle_call({produce_messages_from_file, File}, _From, State) ->
+    Result = handle_resend_file(File),
+    {reply, Result, State}.
 
 -spec handle_info(any(), state()) -> {noreply, state()} |
                                      {stop, {error, any()}, state()}.
@@ -270,12 +277,26 @@ handle_request_metadata(Topics) ->
   kafkerl_metadata_handler:request_metadata(Topics).
 
 handle_dump_buffer_to_disk(State = #state{dump_location = DumpLocation,
+                                          broker_mapping = Mapping,
                                           last_dump_name = LastDumpName}) ->
+
+  %% get all buffers that hold specific known topics + partitions.
+  MappingBuffers = [
+    kafkerl_utils:buffer_name(Topic, Partition)
+    ||{{Topic, Partition},_Connection} <- Mapping
+  ],
+
   % Get the buffer name and all the messages from it
-  Buffer = kafkerl_utils:default_buffer_name(),
-  MessagesInBuffer = ets_buffer:read_all(Buffer),
-  % Split them between the ones that should be retried and those that don't
-  {ToDump, ToRetry} = split_message_dump(MessagesInBuffer, State),
+  DefaultBuffer = kafkerl_utils:default_buffer_name(),
+  AllBuffers = [DefaultBuffer | MappingBuffers],
+
+  {ToDump, ToRetry} =
+    lists:foldl(fun(Buffer, {ToDumps, ToRetries}) ->
+                  MessagesInBuffer = ets_buffer:read_all(Buffer),
+                  {ToDump, ToRetry} = split_message_dump(MessagesInBuffer, State),
+                  {ToDump ++ ToDumps, ToRetry ++ ToRetries}
+                end, {[], []}, AllBuffers),
+
   % Retry the messages on an async function (to avoid locking this gen_server)
   ok = retry_messages(ToRetry),
   % And dump the messages that need to be dumped into a file
@@ -299,6 +320,23 @@ handle_dump_buffer_to_disk(State = #state{dump_location = DumpLocation,
       State#state{last_dump_name = NewDumpName};
     _ ->
       State
+  end.
+
+handle_resend_file(File) ->
+  case file:read_file(File) of
+    {ok, Binary} ->
+      try
+        Messages = erlang:binary_to_term(Binary),
+        retry_messages(Messages),
+        lager:notice("Kafkerl AUDIT: resending file ~p into queue", [File]),
+        {ok, resending}
+      catch Error:_ ->
+        lager:notice("Kafkerl AUDIT: resending file ~p failed with reason ~p", [File, Error]),
+        {error, Error}
+      end;
+    {error, Error} ->
+      lager:notice("Kafkerl AUDIT: resending file ~p failed, file error ~p", [File, Error]),
+      {error, Error}
   end.
 
 %%==============================================================================
