@@ -128,6 +128,7 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%==============================================================================
 %% Handlers
 %%==============================================================================
+-spec init([any()]) -> {ok, state()} | {stop, bad_config}.
 init([Id, Connector, Address, Config, Name]) ->
   Schema = [{tcp_options, [any], {default, []}},
             {retry_interval, positive_integer, {default, 1000}},
@@ -459,6 +460,12 @@ get_message_for_error(Topic, Partition, SavedMessages, Name) ->
       end
   end.
 
+-spec connect(pid(),
+              atom(),
+              list(),
+              kafkerl_connector:address(),
+              any(),
+              any()) -> any().
 connect(Pid, Name, _TCPOpts, {Host, Port} = _Address, _Timeout, 0) ->
   _ = lager:error("~p was unable to connect to ~p:~p", [Name, Host, Port]),
   Pid ! connection_timeout;

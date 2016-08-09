@@ -8,6 +8,7 @@
 %%==============================================================================
 %% API
 %%==============================================================================
+-spec get_error_name(integer()) -> string().
 get_error_name(?NO_ERROR) ->
   "NoError";
 get_error_name(?OFFSET_OUT_OF_RANGE) ->
@@ -43,6 +44,7 @@ get_error_name(?NOT_COORDINATOR_FOR_CONSUMER_CODE) ->
 get_error_name(?UNKNOWN) ->
   "Unknown".
 
+-spec get_error_description(integer()) -> string().
 get_error_description(?NO_ERROR) ->
   "No error";
 get_error_description(?OFFSET_OUT_OF_RANGE) ->
@@ -91,6 +93,7 @@ get_error_description(?NOT_COORDINATOR_FOR_CONSUMER_CODE) ->
 get_error_description(?UNKNOWN) ->
   "An unexpected server error".
 
+-spec get_error_tuple(integer()) -> {error, atom()}.
 get_error_tuple(?NO_ERROR) ->
   {error, no_error};
 get_error_tuple(?OFFSET_OUT_OF_RANGE) ->

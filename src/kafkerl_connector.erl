@@ -170,6 +170,9 @@ handle_call({unsubscribe, Callback}, _From, State) ->
   NewCallbacks = lists:keydelete(Callback, 2, State#state.callbacks),
   {reply, ok, State#state{callbacks = NewCallbacks}}.
 
+-spec handle_info(atom() | {atom(), [] | map()}, state()) ->
+  {stop, {error, unable_to_retrieve_metadata}, state()} |
+  {noreply, state()}.
 handle_info(metadata_timeout, State) ->
   {stop, {error, unable_to_retrieve_metadata}, State};
 handle_info({metadata_updated, []}, State) ->
@@ -219,6 +222,7 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%==============================================================================
 %% Handlers
 %%==============================================================================
+-spec init([{any(), any()}]) -> {ok, state()} | {stop, bad_config}.
 init([Config]) ->
   Schema = [{brokers, [{string, {integer, {1, 65535}}}], required},
             {max_metadata_retries, {integer, {-1, undefined}}, {default, -1}},
@@ -361,6 +365,12 @@ get_ets_dump_name({OldName, Counter}) ->
 get_metadata_tcp_options() ->
   kafkerl_utils:get_tcp_options([{active, false}, {packet, 4}]).
 
+-spec do_request_metadata(pid(), [address()],
+                                  any(),
+                                  non_neg_integer(),
+                                  non_neg_integer(),
+                                  iodata()) ->
+  metadata_timeout | {metadata_updated, broker_mapping()}.
 do_request_metadata(Pid, _Brokers, _TCPOpts, 0, _RetryInterval, _Request) ->
   Pid ! metadata_timeout;
 do_request_metadata(Pid, Brokers, TCPOpts, Retries, RetryInterval, Request) ->
@@ -537,6 +547,7 @@ send_mapping_to(NewCallback, #state{broker_mapping = Mapping}) ->
   Partitions = get_partitions_from_mapping(Mapping),
   send_event({partition_update, Partitions}, NewCallback).
 
+-spec make_metadata_request(state()) -> {pid(), reference()}.
 make_metadata_request(State = #state{brokers = Brokers,
                                      known_topics = Topics,
                                      max_metadata_retries = MaxMetadataRetries,

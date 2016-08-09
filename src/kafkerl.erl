@@ -38,10 +38,12 @@
 %%==============================================================================
 %% API
 %%==============================================================================
+-spec start() -> ok | {error, term()}.
 start() ->
   application:load(?MODULE),
   application:start(?MODULE).
 
+-spec start(any(), any()) -> {ok, pid()}.
 start(_StartType, _StartArgs) ->
   kafkerl_sup:start_link().
 
