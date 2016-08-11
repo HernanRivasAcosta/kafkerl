@@ -15,7 +15,8 @@
 send_error(Callback, Reason) ->
   send_event(Callback, {error, Reason}).
 
--spec send_event(kafkerl:callback(), any()) -> ok | {error, {bad_callback, any()}}.
+-spec send_event(kafkerl:callback(), any()) ->
+  ok | {error, {bad_callback, any()}}.
 send_event({M, F}, Data) ->
   spawn(fun() -> M:F(Data) end),
   ok;

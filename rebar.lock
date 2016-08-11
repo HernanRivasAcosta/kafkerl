@@ -2,7 +2,4 @@
  {<<"goldrush">>,{pkg,<<"goldrush">>,<<"0.1.8">>},1},
  {<<"lager">>,{pkg,<<"lager">>,<<"3.2.1">>},0},
  {<<"parse_trans">>,{pkg,<<"parse_trans">>,<<"3.0.0">>},0},
- {<<"validerl">>,
-  {git,"https://github.com/inaka/validerl.git",
-       {ref,"b64fce3afb3a7140eb59928c3d307d63ee5d407d"}},
-  0}].
+ {<<"validerl">>,{pkg,<<"validerl">>,<<"2.0.1">>},0}].

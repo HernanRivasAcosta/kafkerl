@@ -122,10 +122,10 @@ request_metadata(ServerRef, TopicsOrForced) ->
 request_metadata(ServerRef, Topics, Forced) ->
   gen_server:call(ServerRef, {request_metadata, Topics, Forced}).
 
--spec produce_succeeded(kafkerl:server_ref(), [{kafkerl:topic(),
-                                                kafkerl:partition(),
-                                                [binary()],
-                                                integer()}]) -> ok.
+-spec produce_succeeded(kafkerl:server_ref(), {kafkerl:topic(),
+                                               kafkerl:partition(),
+                                               [binary()],
+                                               integer()}) -> ok.
 produce_succeeded(ServerRef, Messages) ->
   gen_server:cast(ServerRef, {produce_succeeded, Messages}).
 
@@ -413,17 +413,21 @@ do_request_metadata([{Host, Port} = _Broker | T], TCPOpts, Request) ->
               do_request_metadata(T, TCPOpts, Request);
             {ok, Data} ->
               gen_tcp:close(Socket),
-              case kafkerl_protocol:parse_metadata_response(Data) of
-                {error, Reason} ->
-                  warn_metadata_request(Host, Port, Reason),
-                  % The parsing failed, try the next broker
-                  do_request_metadata(T, TCPOpts, Request);
-                {ok, _CorrelationId, Metadata} ->
-                  % We received a metadata response, make sure it has brokers
-                  {ok, get_topic_mapping(Metadata)}
-              end
+              parse_metadata_response(Data, Host, Port, T, TCPOpts,
+                                      Request)
           end
       end
+  end.
+
+parse_metadata_response(Data, Host, Port, T, TCPOpts, Request) ->
+  case kafkerl_protocol:parse_metadata_response(Data) of
+    {error, Reason} ->
+      warn_metadata_request(Host, Port, Reason),
+      % The parsing failed, try the next broker
+      do_request_metadata(T, TCPOpts, Request);
+    {ok, _CorrelationId, Metadata} ->
+      % We received a metadata response, make sure it has brokers
+      {ok, get_topic_mapping(Metadata)}
   end.
 
 send_event(Event, {all, Callback}) ->

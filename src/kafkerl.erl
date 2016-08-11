@@ -12,11 +12,11 @@
 -type offset()     :: integer().
 
 -type callback()   :: pid() |
-                      fun() | 
+                      fun() |
                       {atom(), atom()} |
                       {atom(), atom(), [any()]}.
--type option()     :: {buffer_size, integer() | infinity} | 
-                      {dump_location, string()} | 
+-type option()     :: {buffer_size, integer() | infinity} |
+                      {dump_location, string()} |
                       {consumer, callback()} |
                       {min_bytes, integer()} |
                       {max_wait, integer()} |
@@ -40,8 +40,8 @@
 %%==============================================================================
 -spec start() -> ok | {error, term()}.
 start() ->
-  application:load(?MODULE),
-  application:start(?MODULE).
+  ok = application:load(?MODULE),
+  ok = application:start(?MODULE).
 
 -spec start(any(), any()) -> {ok, pid()}.
 start(_StartType, _StartArgs) ->
@@ -51,7 +51,11 @@ start(_StartType, _StartArgs) ->
 %% Access API
 %%==============================================================================
 %% Produce API
--spec produce(topic(), partition(), payload()) -> ok.
+
+-spec produce(server_ref(), basic_message(), options()) -> ok;
+             (topic(), partition(), payload()) -> ok.
+produce(_ServerRef, {Topic, Partition, Message}, Options) ->
+  produce(?MODULE, Topic, Partition, Message, Options);
 produce(Topic, Partition, Message) ->
   produce(?MODULE, Topic, Partition, Message, []).
 
@@ -85,7 +89,7 @@ consume(ServerRef, Topic, Partition, Options) ->
         proplists:get_value(fetch_interval, Options, false)} of
     {undefined, false} ->
       NewOptions = [{consumer, self()} | Options],
-      kafkerl_connector:fetch(ServerRef, Topic, Partition, NewOptions),
+      ok = kafkerl_connector:fetch(ServerRef, Topic, Partition, NewOptions),
       kafkerl_utils:gather_consume_responses();
     {undefined, _} ->
       {error, fetch_interval_specified_with_no_consumer};
