@@ -15,7 +15,8 @@
 send_error(Callback, Reason) ->
   send_event(Callback, {error, Reason}).
 
--spec send_event(kafkerl:callback(), any()) -> ok | {error, {bad_callback, any()}}.
+-spec send_event(kafkerl:callback(), any()) ->
+  ok | {error, {bad_callback, any()}}.
 send_event({M, F}, Data) ->
   spawn(fun() -> M:F(Data) end),
   ok;
@@ -34,6 +35,8 @@ send_event(BadCallback, _Data) ->
 default_tcp_options() ->
   % This list has to be sorted
   [{mode, binary}, {packet, 0}].
+
+-spec get_tcp_options([{any(), any()}]) -> list().
 get_tcp_options(Options) -> % TODO: refactor
   UnfoldedOptions = proplists:unfold(Options),
   lists:ukeymerge(1, lists:sort(UnfoldedOptions), default_tcp_options()).
@@ -147,8 +150,11 @@ is_partition({Partition, Messages}) ->
 is_partition(_Any) ->
   false.
 
+-spec gather_consume_responses() -> [] | {any(), any()}.
 gather_consume_responses() ->
   gather_consume_responses(2500).
+
+-spec gather_consume_responses(integer()) -> [] | {any(), any()}.
 gather_consume_responses(Timeout) ->
   gather_consume_responses(Timeout, []).
 gather_consume_responses(Timeout, Acc) ->

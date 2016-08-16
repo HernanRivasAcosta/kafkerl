@@ -122,10 +122,10 @@ request_metadata(ServerRef, TopicsOrForced) ->
 request_metadata(ServerRef, Topics, Forced) ->
   gen_server:call(ServerRef, {request_metadata, Topics, Forced}).
 
--spec produce_succeeded(kafkerl:server_ref(), [{kafkerl:topic(),
-                                                kafkerl:partition(),
-                                                [binary()],
-                                                integer()}]) -> ok.
+-spec produce_succeeded(kafkerl:server_ref(), {kafkerl:topic(),
+                                               kafkerl:partition(),
+                                               [binary()],
+                                               integer()}) -> ok.
 produce_succeeded(ServerRef, Messages) ->
   gen_server:cast(ServerRef, {produce_succeeded, Messages}).
 
@@ -170,6 +170,9 @@ handle_call({unsubscribe, Callback}, _From, State) ->
   NewCallbacks = lists:keydelete(Callback, 2, State#state.callbacks),
   {reply, ok, State#state{callbacks = NewCallbacks}}.
 
+-spec handle_info(atom() | {atom(), [] | map()}, state()) ->
+  {stop, {error, unable_to_retrieve_metadata}, state()} |
+  {noreply, state()}.
 handle_info(metadata_timeout, State) ->
   {stop, {error, unable_to_retrieve_metadata}, State};
 handle_info({metadata_updated, []}, State) ->
@@ -219,6 +222,7 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%==============================================================================
 %% Handlers
 %%==============================================================================
+-spec init([{any(), any()}]) -> {ok, state()} | {stop, bad_config}.
 init([Config]) ->
   Schema = [{brokers, [{string, {integer, {1, 65535}}}], required},
             {max_metadata_retries, {integer, {-1, undefined}}, {default, -1}},
@@ -361,6 +365,12 @@ get_ets_dump_name({OldName, Counter}) ->
 get_metadata_tcp_options() ->
   kafkerl_utils:get_tcp_options([{active, false}, {packet, 4}]).
 
+-spec do_request_metadata(pid(), [address()],
+                                  any(),
+                                  non_neg_integer(),
+                                  non_neg_integer(),
+                                  iodata()) ->
+  metadata_timeout | {metadata_updated, broker_mapping()}.
 do_request_metadata(Pid, _Brokers, _TCPOpts, 0, _RetryInterval, _Request) ->
   Pid ! metadata_timeout;
 do_request_metadata(Pid, Brokers, TCPOpts, Retries, RetryInterval, Request) ->
@@ -403,17 +413,21 @@ do_request_metadata([{Host, Port} = _Broker | T], TCPOpts, Request) ->
               do_request_metadata(T, TCPOpts, Request);
             {ok, Data} ->
               gen_tcp:close(Socket),
-              case kafkerl_protocol:parse_metadata_response(Data) of
-                {error, Reason} ->
-                  warn_metadata_request(Host, Port, Reason),
-                  % The parsing failed, try the next broker
-                  do_request_metadata(T, TCPOpts, Request);
-                {ok, _CorrelationId, Metadata} ->
-                  % We received a metadata response, make sure it has brokers
-                  {ok, get_topic_mapping(Metadata)}
-              end
+              parse_metadata_response(Data, Host, Port, T, TCPOpts,
+                                      Request)
           end
       end
+  end.
+
+parse_metadata_response(Data, Host, Port, T, TCPOpts, Request) ->
+  case kafkerl_protocol:parse_metadata_response(Data) of
+    {error, Reason} ->
+      warn_metadata_request(Host, Port, Reason),
+      % The parsing failed, try the next broker
+      do_request_metadata(T, TCPOpts, Request);
+    {ok, _CorrelationId, Metadata} ->
+      % We received a metadata response, make sure it has brokers
+      {ok, get_topic_mapping(Metadata)}
   end.
 
 send_event(Event, {all, Callback}) ->
@@ -537,6 +551,7 @@ send_mapping_to(NewCallback, #state{broker_mapping = Mapping}) ->
   Partitions = get_partitions_from_mapping(Mapping),
   send_event({partition_update, Partitions}, NewCallback).
 
+-spec make_metadata_request(state()) -> {pid(), reference()}.
 make_metadata_request(State = #state{brokers = Brokers,
                                      known_topics = Topics,
                                      max_metadata_retries = MaxMetadataRetries,

@@ -19,29 +19,30 @@
 -type start_link_response() :: {ok, atom(), pid()} | ignore | {error, any()}.
 
 -record(fetch, {correlation_id     = 0 :: kafkerl_protocol:correlation_id(),
-                server_ref = undefined :: kafkerl:server_ref(),
-                topic      = undefined :: kafkerl:topic(),
-                partition  = undefined :: kafkerl:partition(),
-                options    = undefined :: kafkerl:options(),
+                server_ref = undefined :: undefined | kafkerl:server_ref(),
+                topic      = undefined :: undefined | kafkerl:topic(),
+                partition  = undefined :: undefined | kafkerl:partition(),
+                options    = undefined :: undefined | kafkerl:options(),
                 state           = void :: kafkerl_protocol:fetch_state()}).
 
--record(state, {name       = undefined :: atom(),
+-record(state, {name       = undefined :: undefined | atom(),
                 buffers           = [] :: [atom()],
-                conn_idx   = undefined :: conn_idx(),
-                client_id  = undefined :: binary(),
-                socket     = undefined :: port(),
-                address    = undefined :: kafkerl_connector:address(),
-                connector  = undefined :: pid(),
-                tref       = undefined :: any(),
+                conn_idx   = undefined :: undefined | conn_idx(),
+                client_id  = undefined :: undefined | binary(),
+                socket     = undefined :: undefined | port(),
+                address    = undefined :: undefined |
+                                          kafkerl_connector:address(),
+                connector  = undefined :: undefined | pid(),
+                tref       = undefined :: undefined | any(),
                 tcp_options       = [] :: [any()],
                 max_retries        = 0 :: integer(),
                 retry_interval     = 0 :: integer(),
                 request_number     = 0 :: integer(),
                 pending_requests  = [] :: [integer()],
                 max_time_queued    = 0 :: integer(),
-                ets        = undefined :: atom(),
+                ets        = undefined :: undefined | atom(),
                 fetches           = [] :: [#fetch{}],
-                current_fetch   = void :: kafkerl_protocol:correlation_id() | 
+                current_fetch   = void :: kafkerl_protocol:correlation_id() |
                                           void,
                 scheduled_fetches = [] :: [{{kafkerl:topic(),
                                              kafkerl:partition()},
@@ -128,6 +129,7 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%==============================================================================
 %% Handlers
 %%==============================================================================
+-spec init([any()]) -> {ok, state()} | {stop, bad_config}.
 init([Id, Connector, Address, Config, Name]) ->
   Schema = [{tcp_options, [any], {default, []}},
             {retry_interval, positive_integer, {default, 1000}},
@@ -138,7 +140,7 @@ init([Id, Connector, Address, Config, Name]) ->
     {ok, [TCPOpts, RetryInterval, MaxRetries, ClientId, MaxTimeQueued]} ->
       NewTCPOpts = kafkerl_utils:get_tcp_options(TCPOpts),
       EtsName = list_to_atom(atom_to_list(Name) ++ "_ets"),
-      ets:new(EtsName, [named_table, public, {write_concurrency, true},
+      _ = ets:new(EtsName, [named_table, public, {write_concurrency, true},
                         {read_concurrency, true}]),
       State = #state{conn_idx = Id, tcp_options = NewTCPOpts, address = Address,
                      max_retries = MaxRetries, retry_interval = RetryInterval,
@@ -179,7 +181,7 @@ handle_flush(State = #state{socket = Socket, ets = EtsName, buffers = Buffers,
           _ = lager:critical("~p was unable to write to socket, reason: ~p",
                              [Name, Reason]),
           gen_tcp:close(Socket),
-          ets:delete_all_objects(EtsName, CorrelationId),
+          ets:delete_all_objects(EtsName),
           ok = resend_messages(MergedMessages, Connector),
           {noreply, handle_tcp_close(NewState)};
         ok ->
@@ -209,7 +211,7 @@ handle_fetch(ServerRef, Topic, Partition, Options,
       {reply, {error, fetch_in_progress}, State};
     % We have a valid fetch request!
     {not_found, KeyTakeResult, Scheduled} ->
-      {ok, CorrelationId, NewState} = build_correlation_id(State),  
+      {ok, CorrelationId, NewState} = build_correlation_id(State),
       Offset = proplists:get_value(offset, Options, 0),
       Request = {Topic, {Partition, Offset, 2147483647}},
       MaxWait = proplists:get_value(max_wait, Options),
@@ -344,32 +346,33 @@ handle_fetch_response(Bin, Fetch,
 
 handle_produce_response(Bin, State = #state{connector = Connector, name = Name,
                                             ets = EtsName}) ->
-  case kafkerl_protocol:parse_produce_response(Bin) of
-    {ok, CorrelationId, Topics} ->
-      case ets:lookup(EtsName, CorrelationId) of
-        [{CorrelationId, Messages}] ->
-          ets:delete(EtsName, CorrelationId),
-          {Errors, Successes} = split_errors_and_successes(Topics),
-          % First, send the offsets and messages that were delivered
-          _ = spawn(fun() ->
-                      notify_success(Successes, Messages, Connector)
-                    end),
-          % Then handle the errors
-          case handle_errors(Errors, Messages, Name) of
-            ignore ->
-              {ok, State};
-            {request_metadata, MessagesToResend} ->
-              kafkerl_connector:request_metadata(Connector),
-              ok = resend_messages(MessagesToResend, Connector),
-              {ok, State}
-          end;
-        _ ->
-          _ = lager:warning("~p was unable to get produce response", [Name]),
-          {error, invalid_produce_response}
-      end;
-    Other ->
-     _ = lager:critical("~p got unexpected response when parsing message: ~p",
-                        [Name, Other]),
+  try
+    {ok, CorrelationId, Topics} = kafkerl_protocol:parse_produce_response(Bin),
+    case ets:lookup(EtsName, CorrelationId) of
+      [{CorrelationId, Messages}] ->
+        ets:delete(EtsName, CorrelationId),
+        {Errors, Successes} = split_errors_and_successes(Topics),
+        % First, send the offsets and messages that were delivered
+        _ = spawn(fun() ->
+                    notify_success(Successes, Messages, Connector)
+                  end),
+        % Then handle the errors
+        case handle_errors(Errors, Messages, Name) of
+          ignore ->
+            {ok, State};
+          {request_metadata, MessagesToResend} ->
+            kafkerl_connector:request_metadata(Connector),
+            ok = resend_messages(MessagesToResend, Connector),
+            {ok, State}
+        end;
+      _ ->
+        _ = lager:warning("~p was unable to get produce response", [Name]),
+        {error, invalid_produce_response}
+    end
+  catch
+    _:Er ->
+      _ = lager:critical("~p got unexpected response when parsing message: ~p",
+                        [Name, Er]),
      {ok, State}
   end.
 
@@ -388,7 +391,7 @@ notify_success([{Topic, Partition, Offset} | T], Messages, Pid) ->
   M = messages_in_partition(Partition, Partitions),
   kafkerl_connector:produce_succeeded(Pid, {Topic, Partition, M, Offset}),
   notify_success(T, Messages, Pid).
-  
+
 partitions_in_topic(Topic, Messages) ->
   lists:flatten([P || {T, P} <- Messages, T =:= Topic]).
 messages_in_partition(Partition, Messages) ->
@@ -445,20 +448,28 @@ handle_error({Topic, Partition, Error}, _Messages, Name) ->
 get_message_for_error(Topic, Partition, SavedMessages, Name) ->
   case lists:keyfind(Topic, 1, SavedMessages) of
     false ->
-      _ = lager:error("~p found no messages for topic ~p, partition ~p",
-                      [Name, Topic, Partition]),
+      print_error(Name, Topic, Partition),
       undefined;
     {Topic, Partitions} ->
       case lists:keyfind(Partition, 1, Partitions) of
-        false -> 
-          _ = lager:error("~p found no messages for topic ~p, partition ~p",
-                          [Name, Topic, Partition]),
+        false ->
+          print_error(Name, Topic, Partition),
           undefined;
         {Partition, Messages} ->
           {Topic, Partition, Messages}
       end
   end.
 
+print_error(Name, Topic, Partition) ->
+  _ = lager:error("~p found no messages for topic ~p, partition ~p",
+                 [Name, Topic, Partition]).
+
+-spec connect(pid(),
+              atom(),
+              list(),
+              kafkerl_connector:address(),
+              any(),
+              any()) -> any().
 connect(Pid, Name, _TCPOpts, {Host, Port} = _Address, _Timeout, 0) ->
   _ = lager:error("~p was unable to connect to ~p:~p", [Name, Host, Port]),
   Pid ! connection_timeout;
@@ -467,7 +478,7 @@ connect(Pid, Name, TCPOpts, {Host, Port} = Address, Timeout, Retries) ->
   case gen_tcp:connect(Host, Port, TCPOpts, 5000) of
     {ok, Socket} ->
       _ = lager:debug("~p connnected to ~p:~p", [Name, Host, Port]),
-      gen_tcp:controlling_process(Socket, Pid),
+      ok = gen_tcp:controlling_process(Socket, Pid),
       Pid ! {connected, Socket};
     {error, Reason} ->
       NewRetries = Retries - 1,

@@ -1,8 +1,19 @@
-{application, kafkerl,
- [{description, []},
-  {vsn, "1"},
-  {registered, []},
-  {applications, [kernel, stdlib]},
-  {mod, {kafkerl, []}},
-  {env, []},
-  {lager, [{handlers, [{lager_console_backend, info}]}]}]}.
+{ application
+, kafkerl
+, [ {description, "Apache Kafka 0.8.2 high performance producer/consumer for erlang."}
+  , {vsn, "0.0.1"}
+  , {applications, [kernel, stdlib]}
+  , {modules, [ kafkerl
+              , kafkerl_broker_connection
+              , kafkerl_connector
+              , kafkerl_error
+              , kafkerl_protocol
+              , kafkerl_sup
+              , kafkerl_utils]}
+  , {maintainers, ["Inaka"]}
+  , {licenses, ["Apache 2.0"]}
+  , {links, [{"Github","https://github.com/inaka/kafkerl"}]}
+  , {build_tools, ["rebar3"]}
+  , {lager, [{handlers, [{lager_console_backend, info}]}]}
+  ]
+}.

@@ -7,10 +7,6 @@
 
 -define(SERVER, ?MODULE).
 
--type restart_strategy() :: {supervisor:strategy(),
-                             non_neg_integer(),
-                             non_neg_integer()}.
-
 %%==============================================================================
 %% API
 %%==============================================================================
@@ -21,7 +17,7 @@ start_link() ->
 %%==============================================================================
 %% Utils
 %%==============================================================================
--spec init([]) -> {ok, {restart_strategy(), [supervisor:child_spec()]}}.
+-spec init([]) -> {ok, {{one_for_one, 5, 10}, [supervisor:child_spec()]}}.
 init([]) ->
   ChildSpecs = case application:get_env(kafkerl, disabled, false) of
                  true ->
