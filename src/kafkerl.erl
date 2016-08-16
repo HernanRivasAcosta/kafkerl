@@ -41,7 +41,7 @@
 -spec start() -> ok | {error, term()}.
 start() ->
   ok = application:load(?MODULE),
-  ok = application:start(?MODULE).
+  application:start(?MODULE).
 
 -spec start(any(), any()) -> {ok, pid()}.
 start(_StartType, _StartArgs) ->

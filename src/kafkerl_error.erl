@@ -8,7 +8,7 @@
 %%==============================================================================
 %% API
 %%==============================================================================
--spec get_error_name(integer()) -> string().
+-spec get_error_name(integer()) -> [1..255, ...].
 get_error_name(?NO_ERROR) ->
   "NoError";
 get_error_name(?OFFSET_OUT_OF_RANGE) ->
@@ -44,7 +44,7 @@ get_error_name(?NOT_COORDINATOR_FOR_CONSUMER_CODE) ->
 get_error_name(?UNKNOWN) ->
   "Unknown".
 
--spec get_error_description(integer()) -> string().
+-spec get_error_description(integer()) -> [1..255, ...].
 get_error_description(?NO_ERROR) ->
   "No error";
 get_error_description(?OFFSET_OUT_OF_RANGE) ->
