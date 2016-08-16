@@ -1,7 +1,7 @@
 { application
 , kafkerl
 , [ {description, "Apache Kafka 0.8.2 high performance producer/consumer for erlang."}
-  , {vsn, "0.0.1"}
+  , {vsn, "1.0.0"}
   , {applications, [kernel, stdlib]}
   , {modules, [ kafkerl
               , kafkerl_broker_connection
