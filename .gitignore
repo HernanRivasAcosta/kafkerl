@@ -12,3 +12,5 @@ rebar
 .rebar
 *.dump
 bin/tmp
+doc
+_build

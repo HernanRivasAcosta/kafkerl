@@ -556,7 +556,9 @@ parse_brokers(Count, <<Id:?UINT,
                        Port:?UINT,
                        Remainder/binary>>, Acc) ->
   HostStr = binary_to_list(Host),
-  parse_brokers(Count - 1, Remainder, [{Id, {HostStr, Port}} | Acc]).
+  parse_brokers(Count - 1, Remainder, [{Id, {HostStr, Port}} | Acc]);
+parse_brokers(_Count, _Bin, _Acc) ->
+  {error, bad_binary}.
 
 parse_topic_metadata(Count, Bin) ->
   parse_topic_metadata(Count, Bin, []).
@@ -581,8 +583,10 @@ parse_topic_metadata(Count, <<ErrorCode:?SHORT,
                               Remainder/binary>>, Acc) ->
   {ok, PartitionsMetadata, Remainder} = parse_partition_metadata(0, Remainder),
   TopicMetadata = {ErrorCode, <<"unkown">>, PartitionsMetadata},
-  parse_topic_metadata(Count - 1, Remainder, [TopicMetadata | Acc]).
-  
+  parse_topic_metadata(Count - 1, Remainder, [TopicMetadata | Acc]);
+parse_topic_metadata(_Count, _Bin, _Acc) ->
+  {error, bad_binary}.
+
 parse_partition_metadata(Count, Bin) ->
   parse_partition_metadata(Count, Bin, []).
 
