@@ -1,7 +1,7 @@
 -module(kafkerl).
 -author('hernanrivasacosta@gmail.com').
 
--export([start/0, start/2]).
+-export([start/0]).
 -export([produce/3, produce/4, produce/5,
          consume/2, consume/3, consume/4, stop_consuming/2, stop_consuming/3,
          request_metadata/0, request_metadata/1, request_metadata/2,
@@ -42,10 +42,6 @@
 start() ->
   ok = application:load(?MODULE),
   application:start(?MODULE).
-
--spec start(any(), any()) -> {ok, pid()}.
-start(_StartType, _StartArgs) ->
-  kafkerl_sup:start_link().
 
 %%==============================================================================
 %% Access API
