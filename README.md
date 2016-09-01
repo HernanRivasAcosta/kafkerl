@@ -1,4 +1,4 @@
-kafkerl v2.0.0
+kafkerl v2.1.0
 ==============
 [![Gitter](https://badges.gitter.im/Join Chat.svg)](https://gitter.im/HernanRivasAcosta/kafkerl?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 
