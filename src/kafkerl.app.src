@@ -2,7 +2,7 @@
 , kafkerl
 , [ {description, "Apache Kafka 0.8.2 high performance producer/consumer for erlang."}
   , {vsn, "2.1.0"}
-  , {applications, [kernel, stdlib]}
+  , {applications, [kernel, validerl, epocxy, lager, stdlib]}
   , {mod, {kafkerl_app, []}}
   , {modules, [ kafkerl
               , kafkerl_app

@@ -568,25 +568,24 @@ parse_topic_metadata(Count, <<>>, Acc) when Count =< 0 ->
 parse_topic_metadata(Count, Bin, Acc) when Count =< 0 ->
   lager:warning("Finished parsing topic metadata, ignoring bytes: ~p", [Bin]),
   {ok, lists:reverse(Acc)};
-parse_topic_metadata(Count, <<0:?SHORT,
+parse_topic_metadata(Count, <<ErrorCode:?SHORT,
+                              -1:?SHORT,
+                              PartitionCount:?UINT,
+                              PartitionsBin/binary>>, Acc) ->
+  {ok, PartitionsMetadata, Remainder} = parse_partition_metadata(PartitionCount,
+                                                                 PartitionsBin),
+  TopicMetadata = {ErrorCode, <<"unknown">>, PartitionsMetadata},
+  parse_topic_metadata(Count - 1, Remainder, [TopicMetadata | Acc]);
+parse_topic_metadata(Count, <<ErrorCode:?SHORT,
                               TopicSize:?USHORT,
                               TopicName:TopicSize/binary,
                               PartitionCount:?UINT,
                               PartitionsBin/binary>>, Acc) ->
   {ok, PartitionsMetadata, Remainder} = parse_partition_metadata(PartitionCount,
                                                                  PartitionsBin),
-  TopicMetadata = {0, TopicName, PartitionsMetadata},
-  parse_topic_metadata(Count - 1, Remainder, [TopicMetadata | Acc]);
-parse_topic_metadata(Count, <<ErrorCode:?SHORT,
-                              -1:?SHORT, % TopicSize
-                              0:?UINT, % PartitionCount
-                              Remainder/binary>>, Acc) ->
-  {ok, PartitionsMetadata, Remainder} = parse_partition_metadata(0, Remainder),
-  TopicMetadata = {ErrorCode, <<"unkown">>, PartitionsMetadata},
-  parse_topic_metadata(Count - 1, Remainder, [TopicMetadata | Acc]);
-parse_topic_metadata(_Count, _Bin, _Acc) ->
-  {error, bad_binary}.
-
+  TopicMetadata = {ErrorCode, TopicName, PartitionsMetadata},
+  parse_topic_metadata(Count - 1, Remainder, [TopicMetadata | Acc]).
+  
 parse_partition_metadata(Count, Bin) ->
   parse_partition_metadata(Count, Bin, []).
 
