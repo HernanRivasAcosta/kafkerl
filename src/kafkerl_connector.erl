@@ -348,12 +348,23 @@ retry_messages(Messages) ->
   _Pid = spawn(fun() -> [send(M) || M <- Messages] end),
   ok.
 
+%% in most cases, no message in buffer, pass
+split_message_dump([], _) ->
+    {[], []};
+
 split_message_dump(Messages, #state{max_buffer_size = MaxBufferSize,
+                                    broker_mapping = Mapping,
                                     save_bad_messages = SaveBadMessages})
   when is_list(Messages) ->
 
-  KnownTopics = kafkerl_metadata_handler:get_known_topics(),
+  KnownTopics = [
+          Topic
+          || {{Topic, _Partition},_Connection} <- Mapping
+      ],
+      
   % Split messages between for topics kafkerl knows exist and those that do not.
+  % NOTE: before metadata is fetched from kafka, messages are saved in default buffer.
+  % so we need such process to partition them.
   {Known, Unknown} = lists:partition(fun({Topic, _Partition, _Payload}) ->
                                        lists:member(Topic, KnownTopics)
                                      end, Messages),
