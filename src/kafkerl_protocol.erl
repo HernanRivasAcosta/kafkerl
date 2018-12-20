@@ -193,10 +193,11 @@ build_produce_request({Topic, [{Partition, Messages}]}, Compression) ->
 build_produce_request({Topic, Partition, Messages}, Compression) ->
   % This is a fast version used when producing for a single topic and partition
   TopicSize = byte_size(Topic),
+  Timeout = application:get_env(kafkerl, kafka_cluster_sync_timeout, 2000),
   {Size, MessageSet} = build_message_set(Messages, Compression),
   {Size + TopicSize + 24,
-   [<<-1:?SHORT,
-      -1:?INT, % Timeout %% TODO: get timeout error from kafka when this values is set to -1, after changing it to 1000, error disappers. need to double check if this value is updated in latest kafka protocol
+   [<<-1:?SHORT, %% ACK
+      Timeout:?INT, % Timeout to write over the whole kafka cluster
       1:?UINT,  % TopicCount
       TopicSize:?USHORT>>,
     Topic,
@@ -208,11 +209,12 @@ build_produce_request(Data, Compression) ->
   % Build the body of the request with multiple topics/partitions
   % (Docs at: http://goo.gl/J3C50c)
   TopicCount = length(Data),
+  Timeout = application:get_env(kafkerl, kafka_cluster_sync_timeout, 2000),
   {TopicsSize, Topics} = build_topics(Data, Compression),
   % 10 is the size of the header
   {TopicsSize + 10,
    [<<-1:?SHORT, % RequiredAcks
-      -1:?INT, % Timeout
+      Timeout:?INT, % Timeout
       TopicCount:?UINT>>,
       Topics]}.
 
