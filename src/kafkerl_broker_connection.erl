@@ -105,9 +105,7 @@ handle_info({connected, Socket}, State) ->
     handle_flush(State#state{socket = Socket});
 handle_info(connection_timeout, State) ->
     {stop, {error, unable_to_connect}, State};
-handle_info({tcp_closed, _Socket}, State = #state{name = Name,
-    address = {Host, Port}}) ->
-    _ = lager:warning("~p lost connection to ~p:~p", [Name, Host, Port]),
+handle_info({tcp_closed, _Socket}, State = #state{}) ->
     NewState = handle_tcp_close(State),
     {noreply, NewState};
 handle_info({tcp, _Socket, Bin}, State) ->
