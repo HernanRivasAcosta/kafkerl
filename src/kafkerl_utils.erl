@@ -123,22 +123,6 @@ merge_messages(A, B) ->
     {false, false} -> [B, A]
   end.
 
-is_list_of_binaries(L) when is_list(L) ->
-  length(L) > 0 andalso lists:all(fun is_binary/1, L);
-is_list_of_binaries(_Any) ->
-  false.
-
-is_partition_list(L) when is_list(L) ->
-  length(L) > 0 andalso lists:all(fun is_partition/1, L);
-is_partition_list(_Any) ->
-  false.
-
-is_partition({Partition, Messages}) ->
-  is_integer(Partition) andalso Partition >= 0 andalso
-  (is_binary(Messages) orelse is_list_of_binaries(Messages));
-is_partition(_Any) ->
-  false.
-
 gather_consume_responses() ->
   gather_consume_responses(2500).
 gather_consume_responses(Timeout) ->
