@@ -36,6 +36,8 @@ get_error_name(?STALE_CONTROLLER_EPOCH) ->
   "StaleControllerEpoch";
 get_error_name(?OFFSET_METADATA_TOO_LARGE) ->
   "OffsetMetadataTooLarge";
+get_error_name(?NETWORK_EXCEPTION) ->
+  "NetworkException";
 get_error_name(?COORDINATOR_LOAD_IN_PROGRESS) ->
   "CoordinatorLoadInProgress";
 get_error_name(?COORDINATOR_NOT_AVAILABLE) ->
@@ -236,6 +238,8 @@ get_error_description(?STALE_CONTROLLER_EPOCH) ->
   "The controller moved to another broker.";
 get_error_description(?OFFSET_METADATA_TOO_LARGE) ->
   "The metadata field of the offset request was too large.";
+get_error_description(?NETWORK_EXCEPTION) ->
+  "The server disconnected before a response was received.";
 get_error_description(?COORDINATOR_LOAD_IN_PROGRESS) ->
   "The coordinator is loading and hence can't process requests.";
 get_error_description(?COORDINATOR_NOT_AVAILABLE) ->
@@ -440,6 +444,8 @@ get_error_tuple(?STALE_CONTROLLER_EPOCH) ->
   {error, stale_controller_epoch};
 get_error_tuple(?OFFSET_METADATA_TOO_LARGE) ->
   {error, offset_metadata_too_large};
+get_error_tuple(?NETWORK_EXCEPTION) ->
+  {error, network_exception};
 get_error_tuple(?COORDINATOR_LOAD_IN_PROGRESS) ->
   {error, coordinator_load_in_progress};
 get_error_tuple(?COORDINATOR_NOT_AVAILABLE) ->
