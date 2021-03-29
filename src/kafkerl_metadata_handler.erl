@@ -282,7 +282,7 @@ get_topic_mapping({BrokerMetadata, TopicMetadata}) ->
         end
                     end, Partitions).
 
-expand_topic({?NO_ERROR, Topic, Partitions}) ->
+expand_topic({?NONE, Topic, Partitions}) ->
     {true, {Topic, Partitions}};
 expand_topic({Error = ?REPLICA_NOT_AVAILABLE, Topic, Partitions}) ->
     % Replica not available can be ignored, still, show a warning
@@ -299,7 +299,7 @@ expand_partitions(Metadata) ->
 
 expand_partitions({_Topic, []}, Acc) ->
     {true, Acc};
-expand_partitions({Topic, [{?NO_ERROR, Partition, Leader, _, _} | T]}, Acc) ->
+expand_partitions({Topic, [{?NONE, Partition, Leader, _, _} | T]}, Acc) ->
     ExpandedPartition = {{Topic, Partition}, Leader},
     expand_partitions({Topic, T}, [ExpandedPartition | Acc]);
 expand_partitions({Topic, [{Error = ?REPLICA_NOT_AVAILABLE, Partition, Leader,

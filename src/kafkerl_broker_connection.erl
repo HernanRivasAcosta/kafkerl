@@ -419,7 +419,7 @@ split_errors_and_successes(Topics) ->
 split_errors_and_successes([], Acc) ->
     Acc;
 split_errors_and_successes([{Topic, Partitions} | T], Acc) ->
-    F = fun({Partition, ?NO_ERROR, Offset}, {E, S}) ->
+    F = fun({Partition, ?NONE, Offset}, {E, S}) ->
         {E, [{Topic, Partition, Offset} | S]};
         ({Partition, Error, _}, {E, S}) ->
             {[{Topic, Partition, Error} | E], S}
@@ -440,7 +440,7 @@ handle_errors(Errors, Messages, Name) ->
 
 handle_error({Topic, Partition, Error}, Messages, Name)
     when Error =:= ?UNKNOWN_TOPIC_OR_PARTITION orelse
-    Error =:= ?NOT_LEADER_FOR_PARTITION orelse
+    Error =:= ?NOT_LEADER_OR_FOLLOWER orelse
     Error =:= ?LEADER_NOT_AVAILABLE ->
     case get_message_for_error(Topic, Partition, Messages, Name) of
         undefined -> false;
