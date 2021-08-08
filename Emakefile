@@ -1,5 +1,4 @@
-{"src/*", [{parse_transform, lager_transform},
-           warn_unused_vars,
+{"src/*", [warn_unused_vars,
            warn_export_all,
            warn_shadow_vars,
            warn_unused_import,
@@ -15,8 +14,7 @@
            debug_info,
            {outdir, "/ebin"},
            {i, "include"}]}.
-{"test/*", [{parse_transform, lager_transform},
-            warn_unused_vars,
+{"test/*", [warn_unused_vars,
             warn_export_all,
             warn_shadow_vars,
             warn_unused_import,

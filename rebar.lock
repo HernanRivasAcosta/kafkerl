@@ -1,5 +1,12 @@
-[{<<"epocxy">>,{pkg,<<"epocxy">>,<<"1.1.0">>},0},
- {<<"goldrush">>,{pkg,<<"goldrush">>,<<"0.1.8">>},1},
- {<<"lager">>,{pkg,<<"lager">>,<<"3.2.1">>},0},
- {<<"parse_trans">>,{pkg,<<"parse_trans">>,<<"3.0.0">>},0},
- {<<"validerl">>,{pkg,<<"validerl">>,<<"2.0.1">>},0}].
+[{<<"epocxy">>,
+  {git,"https://github.com/duomark/epocxy",
+       {ref,"665d79dfdb78df036bac3b3cb6db55e78406880e"}},
+  0},
+ {<<"proper">>,
+  {git,"https://github.com/manopapad/proper",
+       {ref,"9f6a6501430479bed66d08cd795cd34d36ec83aa"}},
+  1},
+ {<<"validerl">>,
+  {git,"https://github.com/HernanRivasAcosta/validerl",
+       {ref,"c2bb4c3ce83ce01a8004afe01bf226d052d8a5dd"}},
+  0}].

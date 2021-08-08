@@ -1,6 +1,8 @@
 -module(kafkerl_protocol).
 -author('hernanrivasacosta@gmail.com').
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([build_produce_request/3, build_produce_request/4,
          build_fetch_request/5,
          build_metadata_request/3]).
@@ -408,7 +410,8 @@ parse_produced_topics(Count, Bin) ->
 parse_produced_topics(Count, <<>>, Acc) when Count =< 0 ->
   {ok, lists:reverse(Acc)};
 parse_produced_topics(Count, Bin, Acc) when Count =< 0 ->
-  lager:warning("Finished parsing produce response, ignoring bytes: ~p", [Bin]),
+  ok = ?LOG_WARNING("Finished parsing produce response, ignoring bytes: ~p",
+                    [Bin]),
   {ok, lists:reverse(Acc)};
 parse_produced_topics(Count, <<TopicNameLength:?USHORT,
                                TopicName:TopicNameLength/binary,
@@ -438,7 +441,7 @@ parse_topics(Count, Bin) ->
 parse_topics(Count, <<>>, Acc) when Count =< 0 ->
   {ok, lists:reverse(Acc)};
 parse_topics(Count, Bin, Acc) when Count =< 0 ->
-  lager:warning("Finished parsing topics, ignoring bytes: ~p", [Bin]),
+  ok = ?LOG_WARNING("Finished parsing topics, ignoring bytes: ~p", [Bin]),
   {ok, lists:reverse(Acc)};
 parse_topics(Count, Bin, Acc) ->
   case parse_topic(Bin) of
@@ -566,7 +569,8 @@ parse_topic_metadata(Count, Bin) ->
 parse_topic_metadata(Count, <<>>, Acc) when Count =< 0 ->
   {ok, lists:reverse(Acc)};
 parse_topic_metadata(Count, Bin, Acc) when Count =< 0 ->
-  lager:warning("Finished parsing topic metadata, ignoring bytes: ~p", [Bin]),
+  ok = ?LOG_WARNING("Finished parsing topic metadata, ignoring bytes: ~p",
+                    [Bin]),
   {ok, lists:reverse(Acc)};
 parse_topic_metadata(Count, <<ErrorCode:?SHORT,
                               -1:?SHORT,
