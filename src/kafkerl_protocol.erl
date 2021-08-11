@@ -529,21 +529,31 @@ parse_message(<<_Offset:?ULONG,
                 MessageSize:?INT,
                 Message:MessageSize/binary,
                 Remainder/binary>>) ->
-  <<_Crc:?UINT,
-    _MagicByte:?UCHAR,
-    _Attributes:?UCHAR,
-    KeyValue/binary>> = Message,
-  KV = case KeyValue of
-         <<KeySize:?UINT, Key:KeySize/binary,
-           ValueSize:?UINT, Value:ValueSize/binary>> ->
-             {Key, Value};
-         % 4294967295 is -1 and it signifies an empty Key http://goo.gl/Ssl4wq
-         <<4294967295:?UINT,
-           ValueSize:?UINT, Value:ValueSize/binary>> ->
-             Value
-       end,
-  % 12 is the size of the offset plus the size of the MessageSize int
-  {ok, {KV, MessageSize + 12}, Remainder};
+  case Message of
+    <<_Crc:?UINT, 0:?UCHAR, _Attributes:?UCHAR, KeyValue/binary>> ->
+      KV = case KeyValue of
+             <<KeySize:?UINT, Key:KeySize/binary,
+               ValueSize:?UINT, Value:ValueSize/binary>> ->
+                 {Key, Value};
+             % 4294967295 is -1 and it signifies an empty Key http://goo.gl/Ssl4wq
+             <<4294967295:?UINT,
+               ValueSize:?UINT, Value:ValueSize/binary>> ->
+                 Value
+           end,
+      % 12 is the size of the offset plus the size of the MessageSize int
+      {ok, {KV, MessageSize + 12}, Remainder};
+    <<_Crc:?UINT, 1:?UCHAR, _TS:?ULONG, _Attributes:?UCHAR, KeyValue/binary>> ->
+      KV = case KeyValue of
+             <<KeySize:?UINT, Key:KeySize/binary,
+               ValueSize:?UINT, Value:ValueSize/binary>> ->
+                 {Key, Value};
+             <<4294967295:?UINT,
+               ValueSize:?UINT, Value:ValueSize/binary>> ->
+                 Value
+           end,
+      % 20 is the size of the offset with the timestamp
+      {ok, {KV, MessageSize + 20}, Remainder}
+  end;
 parse_message(_) ->
   incomplete.
 
